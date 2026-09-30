@@ -1,0 +1,28 @@
+{
+  "synthetic_projection": false,
+  "rvq_diagnostic_only": true,
+  "projection_dir": "E:\\lyra\\rvq",
+  "rvq_dir": "E:\\lyra\\rvq",
+  "flash_base": 65536,
+  "backend_flash_base": 286720,
+  "backend_bytes": 49152,
+  "flash_bytes": 270336,
+  "indices": [
+    66,
+    62,
+    15,
+    69,
+    93,
+    24,
+    14,
+    79,
+    38
+  ],
+  "packed_indices": "4d3c718bb147be42",
+  "source_hashes": {
+    "rvq_codebook_int8.bin": "af7a3b9130b8ce0f758e9412befcdc7d8019054db09e25caff497e8d915e3eb8",
+    "rvq_codebook_packed_4x8_int8.bin": "08ae9667c4ee72995889c145b38819e56e8a7dbcbca9a91bc6e681efd738f380",
+    "rvq_codebook_norm_int32.bin": "e640080dae58512084371ab502730fee3fc2a62023ea65fd03a33b7c1019187d",
+    "rvq_stage_requant_params.bin": "03bc9eb424dbf7c64f3da26f33222d83e85e12252808ebf3d268ef2cd4463b42"
+  }
+}

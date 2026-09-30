@@ -1,0 +1,65 @@
+{
+  "frame_count": 10,
+  "frame_samples": 320,
+  "sample_rate": 16000,
+  "history": "zero at each frame; not streaming",
+  "source": {
+    "mode": "raw_pcm_independent_frames",
+    "path": "E:\\111\\encoder\\pcm",
+    "sha256": "cc3bf75ac82e60058fc2cab30159770935f3151ccc8acc20d230f69628541011",
+    "pcm_format": "signed_int16_little_endian",
+    "sample_rate_assumption": 16000
+  },
+  "frames": [
+    {
+      "frame": 0,
+      "pcm_sha256": "b2206b3ce478fecc423577cbd05fd52ab8e777551488561b90d5ec4bc237a42c",
+      "packed64": "f93d798bb147b942"
+    },
+    {
+      "frame": 1,
+      "pcm_sha256": "e07348cb61be9377546a0b90eedb442247aed08257bd3f16994ac3ca4cf46277",
+      "packed64": "4d3c718bb147be42"
+    },
+    {
+      "frame": 2,
+      "pcm_sha256": "a6aa8f63c706b116baa48ff6cec82356525a28ebf4054aefa8b11eacc765ace3",
+      "packed64": "233c718bb147b942"
+    },
+    {
+      "frame": 3,
+      "pcm_sha256": "b3ca119f5dd2c350854d4f610495daada54547108a870168dc0e4b8141ddaa15",
+      "packed64": "a33d298bb147b942"
+    },
+    {
+      "frame": 4,
+      "pcm_sha256": "c36e23f68cce2cd310a85766a8e4f45e1db0993ce3ef390d486c2b277b4d9112",
+      "packed64": "a33d298bb147b942"
+    },
+    {
+      "frame": 5,
+      "pcm_sha256": "1c752abd36641fb7adb36f667a26f8f88c677ef20788b213202a628775654e4a",
+      "packed64": "a33d298bb147b942"
+    },
+    {
+      "frame": 6,
+      "pcm_sha256": "838c69a0a029721a3afc4de37c8ce6f52d2bb4f8605601958bc1a94e214b1817",
+      "packed64": "233c718a1147b942"
+    },
+    {
+      "frame": 7,
+      "pcm_sha256": "fc5a5cdf5d01b60953768d3a9ddd1c78c2c49c294621769526b08cc66bc795da",
+      "packed64": "4a9fa05891678742"
+    },
+    {
+      "frame": 8,
+      "pcm_sha256": "10d7053fb6d1c4ab1c2c3e2529c2ce2d75a33eccb123c4f40e6fb29128784bd5",
+      "packed64": "fc732724d148a163"
+    },
+    {
+      "frame": 9,
+      "pcm_sha256": "ba3e837485b30cacb20e7c116d5d053d259335c907930e27e92e49f285dcd178",
+      "packed64": "e2144089516807a3"
+    }
+  ]
+}
