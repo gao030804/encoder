@@ -56,7 +56,8 @@ module conv1d_engine_flash_top #(
     output [255:0] boot_param_data,
     input                                       clk,
     input                                       rst_n,
-    input tri0                                  mesh_scan_test_en,
+    // 普通wire端口供ASIC综合；功能模式显式接0，禁止依赖悬空默认值。
+    input wire                                  mesh_scan_test_en,
     input                                       start,
     output                                      busy,
     output                                      done,

@@ -27,7 +27,8 @@ module conv1d_engine_top #(
 ) (
     input                                       clk,
     input                                       rst_n,
-    input tri0                                  mesh_scan_test_en,
+    // 功能模式显式接0；扫描模式逐层传递至Mesh ICG。
+    input wire                                  mesh_scan_test_en,
     input                                       start,
     output                                      busy,
     output                                      done,

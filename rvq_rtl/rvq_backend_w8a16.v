@@ -31,7 +31,9 @@ module rvq_backend_w8a16 #(
 localparam IDLE=0,LREQ=1,LWAIT=2,PPREQ=3,PPWAIT=4,PWREQ=5,PWWAIT=6,
            PMAC=7,PQUANT=8,RPREQ=9,RPWAIT=10,NREQ=11,NWAIT=12,
            BREQ=13,BWAIT=14,DOT=15,SCORE=16,SREQ=17,SWAIT=18,
-           UPDATE=19,STAGE_END=20,OUTPUT=21,HOLD=22;
+           UPDATE=19,STAGE_END=20,OUTPUT=21,HOLD=22,
+           // 保留0～22原状态编码，新增两拍切断投影量化长组合路径。
+           PBIAS=23,PMUL=24;
 reg [4:0] state;
 reg [3:0] latent_group, stage;
 reg [4:0] channel, dimension;
@@ -40,6 +42,10 @@ reg [1:0] group8;
 reg [7:0] candidate, best_index;
 reg signed [31:0] best_score, norm, dot_acc;
 reg signed [39:0] projection_acc, bias;
+// 投影量化的两级中间结果：先INT40加Bias饱和，再做40×32有符号乘法。
+// multiplier/shift在PPWAIT锁存，直到当前通道PQUANT完成前均不更新。
+reg signed [39:0] biased_q;
+reg signed [79:0] product_q;
 reg signed [31:0] multiplier, next_m, output_m;
 reg [7:0] shift, next_s, output_s;
 reg signed [15:0] x [0:63];
@@ -134,7 +140,8 @@ endfunction
 wire signed [40:0] biased=$signed(projection_acc)+$signed(bias);
 wire signed [39:0] biased40=(biased>41'sd549755813887) ? 40'sh7fffffffff :
     (biased < -41'sd549755813888) ? 40'sh8000000000 : biased[39:0];
-wire signed [79:0] projected_product=$signed(biased40)*$signed(multiplier);
+// 第三拍仅处理已寄存乘积的舍入/移位/INT16饱和，保持原整数计算顺序。
+wire signed [15:0] projection_result=sat16(round80(product_q,shift));
 wire signed [31:0] score_value=norm-(dot_acc<<<1);
 wire signed [7:0] selected_value=word_q[dimension*8+:8];
 wire signed [16:0] sub_value=$signed({residual[dimension][15],residual[dimension]})-
@@ -151,6 +158,7 @@ always @(posedge clk or negedge rst_n) begin
         latent_group<=0;stage<=0;channel<=0;dimension<=0;half<=0;group8<=0;
         candidate<=0;best_index<=0;best_score<=0;norm<=0;dot_acc<=0;
         projection_acc<=0;bias<=0;multiplier<=0;shift<=0;
+        biased_q<=40'sd0;product_q<=80'sd0;
         next_m<=0;next_s<=0;output_m<=0;output_s<=0;word_q<=0;
         trace_stage<=0;trace_candidate<=0;trace_score<=0;trace_index<=0;
         trace_dimension<=0;trace_residual<=0;trace_codeword<=0;trace_subtract<=0;trace_next<=0;
@@ -189,13 +197,22 @@ always @(posedge clk or negedge rst_n) begin
         PMAC: begin
             projection_acc<=projection_acc+projection_partial;
             if(group8==3) begin
-                if(half) state<=PQUANT;
+                // 最后一拍MAC采用非阻塞赋值；下一拍PBIAS读取最终累加值。
+                if(half) state<=PBIAS;
                 else begin half<=1;state<=PWREQ;end
             end else group8<=group8+1'b1;
         end
+        PBIAS: begin
+            biased_q<=biased40;
+            state<=PMUL;
+        end
+        PMUL: begin
+            product_q<=$signed(biased_q)*$signed(multiplier);
+            state<=PQUANT;
+        end
         PQUANT: begin
-            residual[channel]<=sat16(round80(projected_product,shift));
-            projection_data<=sat16(round80(projected_product,shift));
+            residual[channel]<=projection_result;
+            projection_data<=projection_result;
             projection_channel<=channel;projection_valid<=1;
             if(channel==31) begin stage<=0;state<=RPREQ;end
             else begin channel<=channel+1'b1;state<=PPREQ;end

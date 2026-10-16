@@ -41,7 +41,7 @@ mesh_ce = !mesh_psum_valid || acc_in_ready;
 | `scripts/fpga_system_files.f` | 新增 mesh_icg.v，共 50 个 RTL 文件。 |
 | 6 个已有 Controller 编译脚本 | 补充 mesh_icg.v，防止旧的 Encoder 回归遗漏依赖。 |
 
-`mesh_scan_test_en` 是默认低电平的可选输入。ASIC DFT 应从真实测试模式连接该输入；测试使能仅旁路 ICG，不修改功能 CE 和 valid/ready。
+`mesh_scan_test_en` 是普通 `input wire`，没有悬空默认值。功能模式必须由上层显式接 `1'b0`；ASIC DFT 从真实测试模式连接并驱动该输入。测试使能仅旁路 ICG，不修改功能 CE 和 valid/ready。不要改回 `input tri0`，服务器DC前端曾对此声明报告VER-181。
 
 ## 3. 三种实现配置
 

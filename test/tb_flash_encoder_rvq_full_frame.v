@@ -152,7 +152,8 @@ soundstream_encoder_rvq_w8a16_top #(
     .BOOT_FLASH_BASE(24'h010000),
     .RESIDUAL_SCALE_ALIGN_ENABLE(1)
 ) u_dut (
-    .clk(clk),.rst_n(rst_n),.start(encoder_start),
+    // 功能模式显式关闭扫描旁路，普通wire输入不能悬空。
+    .clk(clk),.rst_n(rst_n),.mesh_scan_test_en(1'b0),.start(encoder_start),
     .start_ready(encoder_start_ready),.busy(encoder_busy),
     .encoder_done(encoder_done),.done(codec_enqueued),
     .encoded_valid(codec_valid),.dma_ready(codec_ready),

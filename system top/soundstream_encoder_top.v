@@ -54,7 +54,8 @@ module soundstream_encoder_top #(
     output boot_ready,
     input                                       clk,
     input                                       rst_n,
-    input tri0                                  mesh_scan_test_en,
+    // 功能模式接1'b0，DFT模式接扫描控制并传递至Mesh ICG。
+    input wire                                  mesh_scan_test_en,
     input                                       start,
     output                                      start_ready,
     output                                      busy,

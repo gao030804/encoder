@@ -44,7 +44,8 @@ module soundstream_encoder_rvq_w8a16_top #(
     output boot_ready,
     input                                       clk,
     input                                       rst_n,
-    input tri0                                  mesh_scan_test_en,
+    // 芯片集成必须明确驱动：功能模式为0，DFT扫描模式可置1旁路时钟门控。
+    input wire                                  mesh_scan_test_en,
     input                                       start,
     output                                      start_ready,
     output                                      busy,

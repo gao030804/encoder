@@ -44,8 +44,9 @@ module conv1d_controller #(
 ) (
     input                                       clk,
     input                                       rst_n,
-    // 工艺 DFT 接口。未连接时默认 0；只旁路 ICG，不改变功能握手。
-    input tri0                                  mesh_scan_test_en,
+    // 工艺DFT接口：功能模式由上层显式接1'b0，扫描模式接DFT控制，禁止悬空。
+    // 使用普通wire端口兼容ASIC综合前端，不依赖仿真器的隐式弱下拉。
+    input wire                                  mesh_scan_test_en,
     input                                       start,
     output reg                                  busy,
     output reg                                  done,
@@ -487,23 +488,48 @@ wire [127:0] elu_out_data;
 wire        elu_lut_cfg_ready_raw;
 wire post_stream_active = (state == S_POST_READ);
 
-// acc响应、requant输出和ELU输出之间分别有一级弹性寄存器。
-// m_tag使用完全相同的ready条件推进，保证写回地址始终与数据对齐。
+// Accumulator响应FIFO的320-bit读MUX后新增一级弹性寄存器。
+// Data/Tag/Valid必须作为同一事务一起推进；后处理反压时三者同时保持。
+// 空槽或本拍下游消费旧值时可接收新值，所以连续握手时仍支持II=1。
+reg                         post_skid_valid;
+reg [319:0]                 post_skid_data;
+reg [M_TAG_WIDTH-1:0]       post_skid_tag;
+wire post_skid_ready = !post_skid_valid || post_in_ready;
+
+// requant输出和ELU输出的m_tag分别镜像对应数据级的ready条件。
 reg                         post_tag_valid;
 reg [M_TAG_WIDTH-1:0]       post_tag_q;
 reg                         elu_tag_valid;
 reg [M_TAG_WIDTH-1:0]       elu_tag_q;
 reg [9:0]                   post_written_count;
 // 连续赋值：组合生成acc_rd_rsp_ready及其相邻接口信号，表达握手、选择或地址关系。
-assign acc_rd_rsp_ready = post_stream_active && post_in_ready;
+assign acc_rd_rsp_ready = post_stream_active && post_skid_ready;
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        post_skid_valid <= 1'b0;
+        post_skid_data  <= 320'd0;
+        post_skid_tag   <= {M_TAG_WIDTH{1'b0}};
+    end else if (!post_stream_active) begin
+        // 退出后处理阶段前，控制器已等待最后一个完整向量写回。
+        // 此处清valid隔离不同输出通道组/层，数据寄存器无事务时保持。
+        post_skid_valid <= 1'b0;
+    end else if (post_skid_ready) begin
+        post_skid_valid <= acc_rd_rsp_valid;
+        if (acc_rd_rsp_valid) begin
+            post_skid_data <= acc_rd_rsp_data;
+            post_skid_tag  <= acc_rd_rsp_addr;
+        end
+    end
+end
 
 // ── 08 后处理：每个Cout独立Bias/Multiplier/Shift，产生INT8写回数据 ───────
 postprocess_8lane u_post (
     .clk                         (clk),
     .rst_n                       (rst_n),
-    .in_valid                    (acc_rd_rsp_valid && post_stream_active),
+    .in_valid                    (post_skid_valid && post_stream_active),
     .in_ready                    (post_in_ready),
-    .acc_data                    (acc_rd_rsp_data),
+    .acc_data                    (post_skid_data),
     .bias_data                   (bias_q),
     .mult_data                   (mult_q),
     .shift_data                  (shift_q),
@@ -581,7 +607,8 @@ output_writer_8lane #(
     .vector_done                 (writer_vector_done)
 );
 
-// 两级m_tag弹性流水，分别镜像postprocess和ELU内部valid寄存器。
+// skid已经锁存FIFO响应Tag；下面两级继续镜像postprocess与ELU。
+// 禁止继续使用acc_rd_rsp_addr，否则增加一拍后数据和写回地址会错位。
 
 // 时序逻辑：在时钟沿更新post_tag_valid、post_tag_q、elu_tag_valid、elu_tag_q、state、busy；复位分支负责恢复确定的空闲状态。
 always @(posedge clk or negedge rst_n) begin
@@ -592,9 +619,9 @@ always @(posedge clk or negedge rst_n) begin
         elu_tag_q      <= {M_TAG_WIDTH{1'b0}};
     end else begin
         if (post_in_ready) begin
-            post_tag_valid <= acc_rd_rsp_valid && post_stream_active;
-            if (acc_rd_rsp_valid && post_stream_active)
-                post_tag_q <= acc_rd_rsp_addr;
+            post_tag_valid <= post_skid_valid && post_stream_active;
+            if (post_skid_valid && post_stream_active)
+                post_tag_q <= post_skid_tag;
         end
         if (elu_in_ready) begin
             elu_tag_valid <= post_valid && post_tag_valid &&
