@@ -38,10 +38,14 @@
 module conv1d_controller #(
     parameter ADDR_WIDTH = 32,
     parameter M_TAG_WIDTH = 9,
-    parameter MAX_M = 320
+    parameter MAX_M = 320,
+    // 0 为原始常开时钟基线；1 为方案 V1 的整 Mesh 时钟门控。
+    parameter MESH_CLOCK_GATE_ENABLE = 1
 ) (
     input                                       clk,
     input                                       rst_n,
+    // 工艺 DFT 接口。未连接时默认 0；只旁路 ICG，不改变功能握手。
+    input tri0                                  mesh_scan_test_en,
     input                                       start,
     output reg                                  busy,
     output reg                                  done,
@@ -400,10 +404,30 @@ wire mesh_weight_swap = (state == S_WAIT_ACC) && !acc_pipeline_busy &&
     have_next_k_group && mesh_shadow_valid && mesh_ce;
 // 连续赋值：组合生成weight_ready及其相邻接口信号，表达握手、选择或地址关系。
 assign weight_ready = mesh_direct_weight_load || mesh_shadow_weight_load;
+
+// V1：Mesh 自己的权重、Skew、PE、Valid/Tag、Deskew 使用同一门控时钟。
+// Controller、Reader、权重搬运和 Accumulator 始终使用原始 clk。
+// DRAIN 依照真实 acc_fire 计数结束，不能因为 act_valid=0 就提前停钟。
+// WAIT_ACC 整段开钟，覆盖 Shadow -> Active 交换及末尾有效位清除。
+wire mesh_phase_active = (state == S_WEIGHT_LOAD) ||
+    (state == S_STREAM) || (state == S_DRAIN) || (state == S_WAIT_ACC);
+wire mesh_clk_en = mesh_phase_active && mesh_ce;
+wire mesh_gclk;
+generate
+    if (MESH_CLOCK_GATE_ENABLE) begin : gen_mesh_clock_gate
+        mesh_icg u_mesh_icg (
+            .clk_i(clk), .en_i(mesh_clk_en),
+            .test_en_i(mesh_scan_test_en), .gclk_o(mesh_gclk)
+        );
+    end else begin : gen_mesh_clock_bypass
+        assign mesh_gclk = clk;
+    end
+endgenerate
+
 mesh_adapter #(
     .M_TAG_WIDTH                 (M_TAG_WIDTH)
 ) u_mesh (
-    .clk                         (clk),
+    .clk                         (mesh_gclk),
     .rst_n                       (rst_n),
     .ce                          (mesh_ce),
     .weight_load                 (mesh_direct_weight_load),

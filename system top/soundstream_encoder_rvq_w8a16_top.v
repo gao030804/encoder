@@ -38,8 +38,13 @@ module soundstream_encoder_rvq_w8a16_top #(
     output boot_aux_write,
     output [15:0] boot_aux_index,
     output [255:0] boot_aux_data,
+    output boot_param_write,
+    output [12:0] boot_param_block,
+    output [255:0] boot_param_data,
+    output boot_ready,
     input                                       clk,
     input                                       rst_n,
+    input tri0                                  mesh_scan_test_en,
     input                                       start,
     output                                      start_ready,
     output                                      busy,
@@ -177,9 +182,14 @@ soundstream_encoder_top #(
     .FAST_SIM_WEIGHT_CACHE(FAST_SIM_WEIGHT_CACHE),
     .RESIDUAL_SCALE_ALIGN_ENABLE(RESIDUAL_SCALE_ALIGN_ENABLE)
 ) u_encoder (
+    .mesh_scan_test_en(mesh_scan_test_en),
     .boot_aux_write(boot_aux_write),
     .boot_aux_index(boot_aux_index),
     .boot_aux_data(boot_aux_data),
+    .boot_param_write(boot_param_write),
+    .boot_param_block(boot_param_block),
+    .boot_param_data(boot_param_data),
+    .boot_ready(boot_ready),
     .clk(clk),
     .rst_n(rst_n),
     .start(start && start_ready),
@@ -259,7 +269,14 @@ rvq_backend_w8a16 #(.COMPUTE_VECTOR(ENABLE_VECTOR_DEBUG)) u_backend (
     .start(encoder_done),.busy(backend_busy),.error(backend_error),.configured(backend_configured),
     .latent_base(result_buffer_base),.latent_req_valid(back_req),.latent_req_ready(rd_ready),
     .latent_addr(back_addr),.latent_rsp_valid(rd_valid),.latent_rsp_ready(back_rsp_ready),.latent_data(rd_data),
-    .result_valid(backend_result_valid),.result_ready(backend_result_ready),.result_indices(backend_indices),.result_vector(quantized_vector)
+    .result_valid(backend_result_valid),.result_ready(backend_result_ready),
+    .result_indices(backend_indices),.result_vector(quantized_vector),
+    // 以下端口只用于内部逐级调试；板级数据通路不消费这些观测信号。
+    .projection_valid(),.projection_channel(),.projection_data(),
+    .score_valid(),.trace_stage(),.trace_candidate(),.trace_score(),
+    .update_valid(),.trace_dimension(),.trace_residual(),
+    .trace_codeword(),.trace_subtract(),.trace_next(),
+    .stage_valid(),.trace_index()
 );
 encoded_output_ring u_output_ring (
     .clk(clk),.rst_n(rst_n),.in_valid(backend_result_valid),.in_ready(backend_result_ready),

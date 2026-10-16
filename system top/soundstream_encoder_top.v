@@ -48,8 +48,13 @@ module soundstream_encoder_top #(
     output boot_aux_write,
     output [15:0] boot_aux_index,
     output [255:0] boot_aux_data,
+    output boot_param_write,
+    output [12:0] boot_param_block,
+    output [255:0] boot_param_data,
+    output boot_ready,
     input                                       clk,
     input                                       rst_n,
+    input tri0                                  mesh_scan_test_en,
     input                                       start,
     output                                      start_ready,
     output                                      busy,
@@ -159,6 +164,7 @@ wire [15:0] weight_prefetch_blocks;
 wire weight_prefetch_bank,weight_activate_valid,weight_activate_ready;
 wire weight_activate_first,weight_activate_bank;
 wire first_weight_ready,active_weight_first,active_weight_bank,active_weight_valid;
+assign boot_ready = first_weight_ready;
 wire flash_busy;
 wire engine_start,engine_busy,engine_done;
 wire engine_weight_read_fire;
@@ -269,7 +275,10 @@ conv1d_engine_flash_top #(
     .USE_OCTAL_STREAM_CACHE      (USE_OCTAL_STREAM_WEIGHT_CACHE),
     .FAST_SIM_WEIGHT_CACHE       (FAST_SIM_WEIGHT_CACHE)
 ) u_engine_flash (
+    .mesh_scan_test_en            (mesh_scan_test_en),
     .boot_aux_write(boot_aux_write),.boot_aux_index(boot_aux_index),.boot_aux_data(boot_aux_data),
+    .boot_param_write(boot_param_write),.boot_param_block(boot_param_block),
+    .boot_param_data(boot_param_data),
     .clk                         (clk),
     .rst_n                       (rst_n),
     .start                       (engine_start),

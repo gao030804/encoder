@@ -51,8 +51,12 @@ module conv1d_engine_flash_top #(
     output boot_aux_write,
     output [15:0] boot_aux_index,
     output [255:0] boot_aux_data,
+    output boot_param_write,
+    output [12:0] boot_param_block,
+    output [255:0] boot_param_data,
     input                                       clk,
     input                                       rst_n,
+    input tri0                                  mesh_scan_test_en,
     input                                       start,
     output                                      busy,
     output                                      done,
@@ -165,6 +169,7 @@ conv1d_engine_top #(
 ) u_engine (
     .clk                         (clk),
     .rst_n                       (rst_n),
+    .mesh_scan_test_en            (mesh_scan_test_en),
     .start                       (start),
     .busy                        (busy),
     .done                        (done),
@@ -229,6 +234,9 @@ generate
         assign boot_aux_write = 1'b0;
         assign boot_aux_index = 16'd0;
         assign boot_aux_data = 256'd0;
+        assign boot_param_write = 1'b0;
+        assign boot_param_block = 13'd0;
+        assign boot_param_data = 256'd0;
     end
     if (FAST_SIM_WEIGHT_CACHE) begin : g_fast_sim_weight_cache
             // 连续赋值：组合生成octal_cmd_valid及其相邻接口信号，表达握手、选择或地址关系。
@@ -296,6 +304,8 @@ generate
             .QSPI_DUMMY_CYCLES           (8)
         ) u_weight_hierarchy (
             .boot_aux_write(boot_aux_write),.boot_aux_index(boot_aux_index),.boot_aux_data(boot_aux_data),
+            .boot_param_write(boot_param_write),.boot_param_block(boot_param_block),
+            .boot_param_data(boot_param_data),
             .clk                         (clk),
             .rst_n                       (rst_n),
             .req_valid                   (wgt_rd_req_valid),

@@ -27,6 +27,7 @@ module conv1d_engine_top #(
 ) (
     input                                       clk,
     input                                       rst_n,
+    input tri0                                  mesh_scan_test_en,
     input                                       start,
     output                                      busy,
     output                                      done,
@@ -143,6 +144,7 @@ conv1d_controller #(.ADDR_WIDTH(ADDR_WIDTH),
     .MAX_M                       (MAX_M)) u_dense (
     .clk                         (clk),
     .rst_n                       (rst_n),
+    .mesh_scan_test_en            (mesh_scan_test_en),
     .start                       (dense_start),
     .busy                        (dbusy),
     .done                        (ddone),

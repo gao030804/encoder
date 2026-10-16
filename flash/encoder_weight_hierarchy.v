@@ -91,6 +91,10 @@ module encoder_weight_hierarchy #(
     output                                      boot_aux_write,
     output [15:0]                               boot_aux_index,
     output [255:0]                              boot_aux_data,
+    // 与 Global SRAM 同一次 Boot 握手：供 FPGA 参数 SRAM 镜像写入。
+    output                                      boot_param_write,
+    output [12:0]                               boot_param_block,
+    output [255:0]                              boot_param_data,
 
     // 低功耗/调试观察信号：综合时可连接到SRAM宏的CE或sleep控制器。
     output                                      global_sram_active,
@@ -141,6 +145,9 @@ reg        prefetch_armed;
 // Global SRAM端口：Boot期间由Flash DMA写，其余时间由First/Prefetch DMA读。
 wire global_dma_write = (control_state == C_BOOT_WAIT) &&
     dma_block_valid && dma_block_ready && (dma_block_index < GLOBAL_MODEL_BLOCKS);
+assign boot_param_write = global_dma_write;
+assign boot_param_block = dma_block_index[12:0];
+assign boot_param_data = dma_block_data;
 assign boot_aux_write = (control_state == C_BOOT_WAIT) && dma_block_valid && dma_block_ready &&
     (dma_block_index >= GLOBAL_MODEL_BLOCKS);
 assign boot_aux_index = dma_block_index - GLOBAL_MODEL_BLOCKS;
