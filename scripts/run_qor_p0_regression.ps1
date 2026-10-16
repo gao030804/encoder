@@ -7,7 +7,8 @@ param(
     [string] $VivadoBin='E:\Xilinx\Vivado\2018.3\bin',
     [string] $ModelSimBin='E:\modelsim_24\win64pe',
     [ValidatePattern('^[A-Za-z0-9_]+$')] [string] $LogTag='qor_p0',
-    [switch] $CompileOnly
+    [switch] $CompileOnly,
+    [switch] $UseTechClockGate
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
@@ -32,6 +33,8 @@ try {
         'soundstream_encoder_top.v'='rtl/soundstream_encoder_top.v'
         'soundstream_encoder_rvq_w8a16_top.v'='rtl/soundstream_encoder_rvq_w8a16_top.v'
     }
+    # Optional server-compatible gate; the default behavioral latch is unchanged.
+    if($UseTechClockGate){$overrides['mesh_icg_tech.v']='rtl/clock/mesh_icg_tech.v'}
     $sources=@('third_party/opentitan_sram/prim_ram_1p_pkg.sv',
         'third_party/opentitan_sram/prim_ram_2p_pkg.sv',
         'third_party/opentitan_sram/prim_ram_1r1w_pkg.sv',
@@ -52,7 +55,7 @@ try {
     $sources+=@('rtl/flash_boot_parameter_store.v','rtl/flash/P25Q32H.v',
         'tb/tb_flash_encoder_rvq_full_frame.v','tb/tb_qor_p0_full_frame.v',
         'tb/tb_qor_p0_projection.v','tb/tb_qor_p0_post_stream.v',
-        'tb/tb_mesh_scan_port_compat.v')
+        'tb/tb_mesh_scan_port_compat.v','tb/tb_mesh_icg_tech.v')
     foreach($p in $sources){if(-not(Test-Path -LiteralPath $p -PathType Leaf)){throw "Missing source: $p"}}
     foreach($p in $sources){
         if([IO.File]::ReadAllText((Resolve-Path -LiteralPath $p).Path) -match '(?m)^\s*input\s+tri0\s+mesh_scan_test_en\b'){
@@ -68,7 +71,9 @@ try {
         }
     }
     if($Simulator -eq 'Xsim'){
-        & "$VivadoBin/xvlog.bat" -sv -i . -i rtl/flash --log "$outDir/compile_xsim.log" @sources
+        $compileDefines=@()
+        if($UseTechClockGate){$compileDefines=@('-d','MESH_ICG_USE_TECH')}
+        & "$VivadoBin/xvlog.bat" -sv -i . -i rtl/flash @compileDefines --log "$outDir/compile_xsim.log" @sources
         if($LASTEXITCODE -ne 0){throw 'P0 compilation failed'}
     }else{
         $work='build/qor_p0_work'
@@ -76,11 +81,16 @@ try {
             & "$ModelSimBin/vlib.exe" $work
             if($LASTEXITCODE -ne 0){throw 'vlib failed'}
         }
-        & "$ModelSimBin/vlog.exe" -sv -work $work '+incdir+.' '+incdir+rtl/flash' -l "$outDir/compile_modelsim.log" @sources
+        $compileDefines=@()
+        if($UseTechClockGate){$compileDefines=@('+define+MESH_ICG_USE_TECH')}
+        & "$ModelSimBin/vlog.exe" -sv -work $work '+incdir+.' '+incdir+rtl/flash' @compileDefines -l "$outDir/compile_modelsim.log" @sources
         if($LASTEXITCODE -ne 0){throw 'P0 ModelSim compilation failed'}
     }
     $tops=@()
-    if($Phase -ne 'Full'){$tops+=@('tb_mesh_scan_port_compat','tb_qor_p0_projection','tb_qor_p0_post_stream')}
+    if($Phase -ne 'Full'){
+        if($UseTechClockGate){$tops+='tb_mesh_icg_tech'}else{$tops+='tb_mesh_scan_port_compat'}
+        $tops+=@('tb_qor_p0_projection','tb_qor_p0_post_stream')
+    }
     if($Phase -ne 'Units'){$tops+='tb_qor_p0_full_frame'}
     foreach($top in $tops){
         $simLog=Join-Path $outDir ($top+'.log')
@@ -96,6 +106,7 @@ try {
         }
         if($Simulator -eq 'Xsim'){
             $snapshot=$top+"_${ClockMHz}mhz"
+            if($UseTechClockGate){$snapshot+='_tech'}
             & "$VivadoBin/xelab.bat" $top -s $snapshot --mt off --timescale 1ns/1ps @generics --log "$outDir/${top}_elaborate.log"
             if($LASTEXITCODE -ne 0){throw "Elaboration failed: $top"}
             if($CompileOnly){continue}
