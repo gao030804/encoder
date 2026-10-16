@@ -7,16 +7,18 @@
 // 性能检查：记录每层卷积周期、下一层权重预取周期以及预取等待周期。
 //=============================================================================
 module tb_flash_encoder_rvq_full_frame #(
-    parameter integer FRAME_COUNT = 1 // 1保留原回归，10执行独立帧无复位回归
+    parameter integer FRAME_COUNT = 1, // 1保留原回归，10执行独立帧无复位回归
+    parameter integer CLOCK_HZ = 50000000,
+    parameter LOG_PREFIX = "logs/"
 );
 `define HIER u_dut.u_encoder.u_engine_flash.g_encoder_weight_hierarchy.u_weight_hierarchy
 
 localparam [31:0] BUFFER_A_BASE = 32'h0000_1000;
 localparam [31:0] BUFFER_B_BASE = 32'h0000_5000;
-// 50 MHz主时钟；QSPI半周期分频值1，因此实际Flash SCLK为25 MHz。
-localparam integer CLOCK_PERIOD_NS = 20;
-localparam integer CLOCK_HZ = 50000000;
-localparam integer CYCLES_PER_US = 1000 / CLOCK_PERIOD_NS;
+// 频率可配置。QSPI半周期分频值1，SCLK频率为主时钟的一半。
+// 30 MHz对应33.333...ns，必须使用real，不能按整数33ns生成时钟。
+localparam real CLOCK_PERIOD_NS = 1000000000.0 / CLOCK_HZ;
+localparam integer CYCLES_PER_US = CLOCK_HZ / 1000000;
 localparam integer MAX_TEST_CYCLES = 50000000;
 localparam integer NUM_LAYERS = 63;
 localparam integer GOLDEN_BYTES = NUM_LAYERS * 8192;
@@ -152,11 +154,11 @@ soundstream_encoder_rvq_w8a16_top #(
     .BOOT_FLASH_BASE(24'h010000),
     .RESIDUAL_SCALE_ALIGN_ENABLE(1)
 ) u_dut (
-    // 功能模式显式关闭扫描旁路，普通wire输入不能悬空。
+    // 功能回归不启用scan；移除tri0之后必须显式驱动，不能留作Z。
     .clk(clk),.rst_n(rst_n),.mesh_scan_test_en(1'b0),.start(encoder_start),
     .start_ready(encoder_start_ready),.busy(encoder_busy),
     .encoder_done(encoder_done),.done(codec_enqueued),
-    .encoded_valid(codec_valid),.dma_ready(codec_ready),
+    .encoded_valid(codec_valid),.dma_valid(),.dma_ready(codec_ready),
     .dma_data(codec_record),.dma_keep(codec_keep),.dma_last(codec_last),
     .output_level(codec_level),
     .encoded_indices(codec_indices),.quantized_vector(codec_vector),.error(encoder_error),
@@ -215,7 +217,16 @@ P25Q32H #(.Init_File("tb/data/flash_encoder_rvq/flash_image.hex")) u_flash (
 );
 
 
-always #(CLOCK_PERIOD_NS/2) clk = ~clk;
+// 使用累计绝对边沿时间，避免每半周期的1ps舍入误差持续累积。
+// 在30 MHz时，半周期交替舍入到16.666/16.667ns，平均频率保持30 MHz。
+real clock_next_edge_ns;
+initial begin
+    clock_next_edge_ns = 0.0;
+    forever begin
+        clock_next_edge_ns = clock_next_edge_ns + CLOCK_PERIOD_NS/2.0;
+        #(clock_next_edge_ns-$realtime) clk = ~clk;
+    end
+end
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n)
@@ -363,7 +374,10 @@ initial begin
     clk=0; rst_n=0; encoder_start=0; pcm_frontend_start=0;
     layer_prepare_ready=1;
     // 记录本次仿真的真实时钟配置，防止将旧频率日志误判为本次回归。
-    $display("[CLOCK_CONFIG] system_hz=%0d qspi_hz=%0d period_ns=%0d",
+    if(CLOCK_HZ<=0 || CLOCK_HZ%1000000!=0) begin
+        $display("[TB_FAIL] CLOCK_HZ must be a positive integer MHz for timestamp checks");$finish;
+    end
+    $display("[CLOCK_CONFIG] system_hz=%0d qspi_hz=%0d period_ns=%0.6f",
              CLOCK_HZ, CLOCK_HZ / 2, CLOCK_PERIOD_NS);
 
     elu_lut_cfg_valid=0; elu_lut_cfg_addr=0; elu_lut_cfg_wdata=0;

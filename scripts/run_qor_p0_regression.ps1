@@ -6,11 +6,12 @@ param(
     [string] $EnRoot='E:\111\en',
     [string] $VivadoBin='E:\Xilinx\Vivado\2018.3\bin',
     [string] $ModelSimBin='E:\modelsim_24\win64pe',
+    [ValidatePattern('^[A-Za-z0-9_]+$')] [string] $LogTag='qor_p0',
     [switch] $CompileOnly
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
-$relativeLog="logs/qor_p0_${ClockMHz}mhz"
+$relativeLog="logs/${LogTag}_${ClockMHz}mhz"
 $outDir=Join-Path $root $relativeLog
 $tempDir=Join-Path $root 'build/qor_p0_temp'
 foreach($dir in @($outDir,$tempDir)){
@@ -21,11 +22,15 @@ $env:TEMP=$tempDir
 $env:TMP=$tempDir
 Push-Location $root
 try {
-    # Read the shared ASIC bundle, overriding ONLY the two optimized RTL files.
-    # Do not silently compile stale en copies of the edited modules.
+    # Read the shared ASIC bundle; use local P0 RTL and all five scan-port fixes.
+    # Do not silently compile stale en copies with implicit pull-down input ports.
     $overrides=@{
         'conv1d_controller.v'='rtl/conv1d_controller.v'
         'rvq_backend_w8a16.v'='RVQ/rvq_backend_w8a16.v'
+        'conv1d_engine_top.v'='rtl/conv1d_engine_top.v'
+        'conv1d_engine_flash_top.v'='rtl/conv1d_engine_flash_top.v'
+        'soundstream_encoder_top.v'='rtl/soundstream_encoder_top.v'
+        'soundstream_encoder_rvq_w8a16_top.v'='rtl/soundstream_encoder_rvq_w8a16_top.v'
     }
     $sources=@('third_party/opentitan_sram/prim_ram_1p_pkg.sv',
         'third_party/opentitan_sram/prim_ram_2p_pkg.sv',
@@ -46,8 +51,14 @@ try {
     foreach($name in $overrides.Keys){if(-not $overridden.ContainsKey($name)){throw "Missing RTL override target: $name"}}
     $sources+=@('rtl/flash_boot_parameter_store.v','rtl/flash/P25Q32H.v',
         'tb/tb_flash_encoder_rvq_full_frame.v','tb/tb_qor_p0_full_frame.v',
-        'tb/tb_qor_p0_projection.v','tb/tb_qor_p0_post_stream.v')
+        'tb/tb_qor_p0_projection.v','tb/tb_qor_p0_post_stream.v',
+        'tb/tb_mesh_scan_port_compat.v')
     foreach($p in $sources){if(-not(Test-Path -LiteralPath $p -PathType Leaf)){throw "Missing source: $p"}}
+    foreach($p in $sources){
+        if([IO.File]::ReadAllText((Resolve-Path -LiteralPath $p).Path) -match '(?m)^\s*input\s+tri0\s+mesh_scan_test_en\b'){
+            throw "Unsupported scan input declaration reintroduced: $p"
+        }
+    }
     $sources | ForEach-Object {Get-FileHash -Algorithm SHA256 -LiteralPath $_} |
         Select-Object Path,Hash | Export-Csv -NoTypeInformation -Encoding UTF8 (Join-Path $outDir 'source_hashes.csv')
     if($Phase -ne 'Units'){
@@ -69,7 +80,7 @@ try {
         if($LASTEXITCODE -ne 0){throw 'P0 ModelSim compilation failed'}
     }
     $tops=@()
-    if($Phase -ne 'Full'){$tops+=@('tb_qor_p0_projection','tb_qor_p0_post_stream')}
+    if($Phase -ne 'Full'){$tops+=@('tb_mesh_scan_port_compat','tb_qor_p0_projection','tb_qor_p0_post_stream')}
     if($Phase -ne 'Units'){$tops+='tb_qor_p0_full_frame'}
     foreach($top in $tops){
         $simLog=Join-Path $outDir ($top+'.log')
