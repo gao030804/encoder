@@ -496,9 +496,10 @@ reg [319:0]                 post_skid_data;
 reg [M_TAG_WIDTH-1:0]       post_skid_tag;
 wire post_skid_ready = !post_skid_valid || post_in_ready;
 
-// requant输出和ELU输出的m_tag分别镜像对应数据级的ready条件。
-reg                         post_tag_valid;
-reg [M_TAG_WIDTH-1:0]       post_tag_q;
+// requant的m_tag由内部三级流水携带，不能再只在外侧延迟一拍。
+// 保留可读信号名供波形/现有验证使用，valid与数据共用同一来源。
+wire                        post_tag_valid = post_valid;
+wire [M_TAG_WIDTH-1:0]      post_tag_q;
 reg                         elu_tag_valid;
 reg [M_TAG_WIDTH-1:0]       elu_tag_q;
 reg [9:0]                   post_written_count;
@@ -523,8 +524,8 @@ always @(posedge clk or negedge rst_n) begin
     end
 end
 
-// ── 08 后处理：每个Cout独立Bias/Multiplier/Shift，产生INT8写回数据 ───────
-postprocess_8lane u_post (
+// ── 08 后处理：三级逐Cout Bias/Requant，产生INT16并携带m_tag ─────────
+postprocess_8lane #(.TAG_WIDTH(M_TAG_WIDTH)) u_post (
     .clk                         (clk),
     .rst_n                       (rst_n),
     .in_valid                    (post_skid_valid && post_stream_active),
@@ -536,7 +537,9 @@ postprocess_8lane u_post (
     .zero_point_data             (zero_point_q),
     .post_valid                  (post_valid),
     .post_ready                  (post_ready),
-    .post_data                   (post_data)
+    .post_data                   (post_data),
+    .in_tag                      (post_skid_tag),
+    .post_tag                    (post_tag_q)
 );
 
 reg [7:0] write_strb;
@@ -607,22 +610,15 @@ output_writer_8lane #(
     .vector_done                 (writer_vector_done)
 );
 
-// skid已经锁存FIFO响应Tag；下面两级继续镜像postprocess与ELU。
-// 禁止继续使用acc_rd_rsp_addr，否则增加一拍后数据和写回地址会错位。
+// skid锁存FIFO响应Tag，postprocess内部三级保持Tag与数据同步。
+// 此处只镜像ELU的单级握手；不可按固定周期延迟Tag，反压会打乱对齐。
 
-// 时序逻辑：在时钟沿更新post_tag_valid、post_tag_q、elu_tag_valid、elu_tag_q、state、busy；复位分支负责恢复确定的空闲状态。
+// ELU收到后处理输出的同一拍，锁存与该向量对应的m_tag。
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        post_tag_valid <= 1'b0;
-        post_tag_q     <= {M_TAG_WIDTH{1'b0}};
         elu_tag_valid  <= 1'b0;
         elu_tag_q      <= {M_TAG_WIDTH{1'b0}};
     end else begin
-        if (post_in_ready) begin
-            post_tag_valid <= post_skid_valid && post_stream_active;
-            if (post_skid_valid && post_stream_active)
-                post_tag_q <= post_skid_tag;
-        end
         if (elu_in_ready) begin
             elu_tag_valid <= post_valid && post_tag_valid &&
                 post_stream_active;

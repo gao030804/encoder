@@ -1,145 +1,152 @@
+`timescale 1ns/1ps
 // ============================================================================
-// 中文阅读导引（当前实现）
-// 逐输出通道使用独立Bias、Multiplier、Shift和Zero Point。
-// 运算顺序：INT32累加值加Bias并饱和 → INT64乘法 → 舍入/右移 → 加Zero Point → INT8饱和。
-// in_ready=!post_valid||post_ready允许旧输出取走时同拍接收新输入。
-// 当前算术主要在组合逻辑内完成，输出寄存器可连续接收，但不等同于乘法器内部多级流水。
+// W8A16逐Cout后处理：三级Elastic Pipeline，稳态II=1（每拍一组8路）。
+// PP0：INT40 Acc + INT40 Bias -> 41位精确和 -> 饱和回INT40。
+// PP1：INT40 x signed INT32 -> 完整signed INT72乘积。
+// PP2：half-away-from-zero舍入/右移 -> signed INT8 Zero Point -> INT16饱和。
+// Bias外部容器为64位/路，只有低40位有效；不是新增INT64 Bias算法。
+// 每级独立握手，数据、逐通道参数与Tag作为同一事务一起保持/推进。
+// 输入在N沿接收，PP2在N+2沿更新，N+3沿可被下游接收；比原单级多2拍。
 // ============================================================================
-//=============================================================================
-// 模块：postprocess_8lane
-// 功能：对 8 路 INT32 卷积累加值进行逐输出通道重新量化。
-//
-// 每一路的数据路径：
-//   INT32 accumulator + INT32 bias（带饱和）
-//   -> INT32 × INT32 = INT64
-//   -> 对称舍入并算术右移
-//   -> 加 signed INT8 zero_point
-//   -> 显式饱和到 signed INT8
-//
-// valid/ready 规则：post_valid=1 且 post_ready=0 时，输出保持不变。
-//=============================================================================
-
-// -------------------------------------------------------------------------
-// 详细阅读说明：
-// - 每个输出lane独立使用bias、multiplier、shift和zero_point，支持per-Cout量化参数。
-// - 计算链为INT32加Bias、INT64乘法、half-away-from-zero舍入、右移和INT8饱和。
-// - post_valid被反压时post_data保持不变；不能在ready=0时覆盖正在等待的数据。
-// -------------------------------------------------------------------------
-// [中文注释-自动补充]
-// 模块作用：八路逐输出通道后处理。
-// 关键变量/接口：每lane独立执行Bias、Multiplier、Shift、Zero-point、舍入及INT8饱和。
-// 握手约定：valid与ready在同一上升沿同时为1才完成一次传输；反压期间数据必须保持。
-// 位宽约定：地址通常按Byte计，Weight块为256 bit，Activation/Weight基本元素为signed INT8。
-// -----------------------------------------------------------------------------
-// W8A16合同：INT40累加与INT40 Bias相加，乘INT32系数后舍入并饱和为INT16。
-// 部署文件中的Bias使用INT64容器，本模块读取每个容器的低40位二补码。
-module postprocess_8lane (
-    input                                       clk,
-    input                                       rst_n,
-    input                                       in_valid,
-    output                                      in_ready,
-    input              [319:0]                  acc_data,
-    input              [511:0]                  bias_data,
-    input              [255:0]                  mult_data,
-    input              [63:0]                   shift_data,
-    input              [63:0]                   zero_point_data,
-    output reg                                  post_valid,
-    input                                       post_ready,
-    output reg         [127:0]                  post_data
+module postprocess_8lane #(
+    parameter TAG_WIDTH = 1
+) (
+    input  wire                 clk,
+    input  wire                 rst_n,
+    input  wire                 in_valid,
+    output wire                 in_ready,
+    input  wire [319:0]         acc_data,
+    input  wire [511:0]         bias_data,
+    input  wire [255:0]         mult_data,
+    input  wire [63:0]          shift_data,
+    input  wire [63:0]          zero_point_data,
+    output reg                  post_valid,
+    input  wire                 post_ready,
+    output reg  [127:0]         post_data,
+    // Tag不参与算术。Dense使用输出时间位置m；单笔Depthwise可固定为0。
+    input  wire [TAG_WIDTH-1:0] in_tag,
+    output reg  [TAG_WIDTH-1:0] post_tag
 );
+    reg pp0_valid, pp1_valid;
+    reg [319:0] pp0_biased;     // 8 x INT40，Bias饱和后的值
+    reg [255:0] pp0_mult;       // 与PP0数据同笔的8个INT32 multiplier
+    reg [63:0] pp0_shift, pp0_zp;
+    reg [575:0] pp1_product;    // 8 x INT72，精确乘积，不截断有效位
+    reg [63:0] pp1_shift, pp1_zp;
+    reg [TAG_WIDTH-1:0] pp0_tag, pp1_tag;
 
-integer n;
-reg signed [39:0] av;
-reg signed [39:0] bv;
-reg signed [31:0] mv;
-reg signed [15:0] zv;
-reg        [7:0]  sv;
-reg signed [40:0] bias_sum;
-reg signed [39:0] biased_int40;
-reg signed [79:0] scaled, rounded, magnitude, shifted, requantized;
-reg signed [15:0] sat;
-reg        [127:0] calc;
-// 连续赋值：组合生成in_ready及其相邻接口信号，表达握手、选择或地址关系。
-assign in_ready = !post_valid || post_ready;
+    // 满槽仅在本拍旧事务移走时接新事务；ready从输出向输入逐级传播。
+    wire pp2_ready = !post_valid || post_ready;
+    wire pp1_ready = !pp1_valid || pp2_ready;
+    wire pp0_ready = !pp0_valid || pp1_ready;
+    assign in_ready = pp0_ready;
 
-// 组合逻辑：根据当前输入计算calc、av、bv、mv、zv、sv；本逻辑块不保存跨周期状态。
-always @(*) begin
-    calc        = 128'd0;
-    av          = 40'sd0;
-    bv          = 40'sd0;
-    mv          = 32'sd0;
-    zv          = 16'sd0;
-    sv          = 8'd0;
-    bias_sum    = 41'sd0;
-    biased_int40 = 40'sd0;
-    scaled      = 80'sd0;
-    rounded     = 80'sd0;
-    magnitude   = 80'sd0;
-    shifted     = 80'sd0;
-    requantized = 80'sd0;
-    sat         = 16'sd0;
-    for (n = 0; n < 8; n = n + 1) begin
+    // PP0只做Bias加法，不把宽乘法串在此寄存器之前。
+    function [39:0] add_bias_sat40;
+        input signed [39:0] acc, bias;
+        reg signed [40:0] sum;
+        begin
+            sum = {acc[39],acc} + {bias[39],bias};
+            if (sum > 41'sd549755813887)
+                add_bias_sat40 = 40'sh7f_ffff_ffff;
+            else if (sum < -41'sd549755813888)
+                add_bias_sat40 = 40'sh80_0000_0000;
+            else
+                add_bias_sat40 = sum[39:0];
+        end
+    endfunction
 
-        // lane n 对应一个输出通道，四种量化参数均按 lane 独立配置。
-        av = acc_data[40*n +: 40];
-        // 导出文件每个Bias占64 bit，低40 bit为有效二补码。
-        bv = bias_data[64*n +: 40];
-        mv = mult_data[32*n +: 32];
-        sv = shift_data[8*n +: 8];
-        zv = {{8{zero_point_data[8*n+7]}},zero_point_data[8*n +: 8]};
+    // 对s>0：round_half_away(p/2^s)=(p+2^(s-1)-(p<0))>>>s。
+    // 精确乘积先符号扩展到73位，再加舍入项，避免边界舍入溢出。
+    function [15:0] round_shift_sat16;
+        input signed [71:0] product;
+        input [7:0] shift;
+        input signed [7:0] zero_point;
+        reg signed [72:0] extended_product, round_offset, shifted, requantized;
+        begin
+            extended_product = {product[71],product};
+            round_offset = 73'sd0;
+            if (shift == 0) begin
+                shifted = extended_product;
+            end else if (shift < 72) begin
+                round_offset = (73'sd1 << (shift-1'b1)) -
+                               (product[71] ? 73'sd1 : 73'sd0);
+                shifted = (extended_product + round_offset) >>> shift;
+            end else if (shift == 80) begin
+                // 保留旧80-bit RTL在异常shift=80时的位级行为：正/零=-1，负=+1。
+                // 部署文件shift实际0..42；此分支仅为完整UINT8输入域的旧版兼容，
+                // 不是推荐量化公式。若改变异常参数政策，需另行统一Golden。
+                shifted = product[71] ? 73'sd1 : -73'sd1;
+            end else begin
+                // INT40 x INT32的|p|<=2^70；72..79及81..255的旧输出均为0。
+                shifted = 73'sd0;
+            end
+            requantized = shifted + {{65{zero_point[7]}},zero_point};
+            if (requantized > 73'sd32767)
+                round_shift_sat16 = 16'sh7fff;
+            else if (requantized < -73'sd32768)
+                round_shift_sat16 = 16'sh8000;
+            else
+                round_shift_sat16 = requantized[15:0];
+        end
+    endfunction
 
-        // 在 64 bit 中先做加法，再饱和回 INT32，避免 acc+bias 回绕。
-        bias_sum = {av[39],av} + {bv[39],bv};
-
-        // Golden模型约定：累加值与Bias相加后仍属于INT40域。
-        // 因此先用41位保存精确加法结果，再饱和到INT40，最后参与定点乘法。
-        // 这一步避免正溢出/负溢出时发生二补码回绕，并与Python整数参考模型一致。
-        if (bias_sum > 41'sd549755813887)
-            biased_int40 = 40'sh7f_ffff_ffff;
-        else if (bias_sum < -41'sd549755813888)
-            biased_int40 = 40'sh80_0000_0000;
-        else
-            biased_int40 = bias_sum[39:0];
-
-        scaled = $signed(biased_int40) * $signed(mv);
-
-        // 对负数也从绝对值方向舍入。
-        // 例如 -4/2 必须仍为 -2，旧式 (scaled-half)>>>shift 会得到 -3。
-        if (sv == 0) begin
-            shifted = scaled;
-        end else if (scaled >= 0) begin
-            rounded = scaled + (80'sd1 << (sv - 1'b1));
-            shifted = rounded >>> sv;
+    integer lane;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pp0_valid <= 1'b0;
+            pp1_valid <= 1'b0;
+            post_valid <= 1'b0;
+            pp0_biased <= 320'd0;
+            pp0_mult <= 256'd0;
+            pp0_shift <= 64'd0;
+            pp0_zp <= 64'd0;
+            pp1_product <= 576'd0;
+            pp1_shift <= 64'd0;
+            pp1_zp <= 64'd0;
+            pp0_tag <= {TAG_WIDTH{1'b0}};
+            pp1_tag <= {TAG_WIDTH{1'b0}};
+            post_tag <= {TAG_WIDTH{1'b0}};
+            post_data <= 128'd0;
         end else begin
-            magnitude = -scaled;
-            rounded   = magnitude + (80'sd1 << (sv - 1'b1));
-            shifted   = -(rounded >>> sv);
+            // PP2反压时，数据/Tag/valid一起保持，不能只停数据。
+            if (pp2_ready) begin
+                post_valid <= pp1_valid;
+                if (pp1_valid) begin
+                    for (lane=0; lane<8; lane=lane+1)
+                        post_data[16*lane +: 16] <= round_shift_sat16(
+                            $signed(pp1_product[72*lane +: 72]),
+                            pp1_shift[8*lane +: 8], $signed(pp1_zp[8*lane +: 8]));
+                    post_tag <= pp1_tag;
+                end
+            end
+            // PP1乘法两端显式signed，完整72位结果随本笔shift/zp/Tag锁存。
+            if (pp1_ready) begin
+                pp1_valid <= pp0_valid;
+                if (pp0_valid) begin
+                    for (lane=0; lane<8; lane=lane+1)
+                        pp1_product[72*lane +: 72] <=
+                            $signed(pp0_biased[40*lane +: 40]) *
+                            $signed(pp0_mult[32*lane +: 32]);
+                    pp1_shift <= pp0_shift;
+                    pp1_zp <= pp0_zp;
+                    pp1_tag <= pp0_tag;
+                end
+            end
+            // PP0握手时采样所有参数，不依赖外部参数在未来两拍继续稳定。
+            if (pp0_ready) begin
+                pp0_valid <= in_valid;
+                if (in_valid) begin
+                    for (lane=0; lane<8; lane=lane+1)
+                        pp0_biased[40*lane +: 40] <= add_bias_sat40(
+                            $signed(acc_data[40*lane +: 40]),
+                            $signed(bias_data[64*lane +: 40]));
+                    pp0_mult <= mult_data;
+                    pp0_shift <= shift_data;
+                    pp0_zp <= zero_point_data;
+                    pp0_tag <= in_tag;
+                end
+            end
         end
-
-        // 对称量化时 zero_point 配置为 0；非对称量化可逐通道配置。
-        requantized = shifted + {{64{zv[15]}}, zv};
-        if (requantized > 80'sd32767) begin
-            sat = 16'sd32767;
-        end else if (requantized < -80'sd32768) begin
-            sat = -16'sd32768;
-        end else begin
-            sat = requantized[15:0];
-        end
-        calc[16*n +: 16] = sat;
     end
-end
-
-// 时序逻辑：在时钟沿更新post_valid、post_data；复位分支负责恢复确定的空闲状态。
-always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        post_valid <= 1'b0;
-        post_data  <= 128'd0;
-    end else if (in_ready) begin
-        post_valid <= in_valid;
-        if (in_valid) begin
-            post_data <= calc;
-        end
-    end
-end
-
 endmodule

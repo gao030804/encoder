@@ -134,8 +134,8 @@ wire [319:0] acc_bus={acc7,acc6,acc5,acc4,acc3,acc2,acc1,acc0};
 wire post_in_ready,post_valid,post_ready;
 wire [127:0] post_data;
 
-// 8路INT32累加值统一进入逐输出通道后处理：
-// accumulator + bias -> multiplier/shift -> saturation -> INT8。
+// 8路INT40累加值进入三级逐输出通道后处理，最终输出8 x INT16。
+// 每次只有一个输出向量在途，og/m在完整写回前保持，不需地址Tag队列。
 postprocess_8lane u_post (
     .clk                         (clk),
     .rst_n                       (rst_n),
@@ -148,7 +148,9 @@ postprocess_8lane u_post (
     .zero_point_data             (zp_q),
     .post_valid                  (post_valid),
     .post_ready                  (post_ready),
-    .post_data                   (post_data)
+    .post_data                   (post_data),
+    .in_tag                      (1'b0),
+    .post_tag                    ()
 );
 
 integer n;
@@ -293,7 +295,9 @@ always @(posedge clk or negedge rst_n) begin
                     end
                 end
             end
+            // 只在PP0真正接收时离开SEND，不假定后处理首结果只需一拍。
             S_POST_SEND: if(post_in_ready) state<=S_POST_WAIT;
+            // 等待PP2与Writer真正握手；任意流水延迟/反压下都不能提前改m/og。
             S_POST_WAIT: if(post_valid&&post_ready) state<=S_WRITE_WAIT;
             // 等待整个8×INT16向量写完，而不是只等待低64-bit写拍。
             S_WRITE_WAIT: if(writer_vector_done) begin
