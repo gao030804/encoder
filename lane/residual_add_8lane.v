@@ -1,29 +1,15 @@
 // ============================================================================
-// 中文阅读导引（当前实现）
-// 主支路INT8结果与Scratchpad中的identity逐通道相加、饱和并写回。
-// 两条支路必须具有相同量化Scale，本模块不执行独立的支路Scale转换。
-// 输出反压会延缓完成，帧级调度器须等待最后一次实际写回。
+// W8A16 Residual Add：保留历史8lane模块名，64-bit写拍实际包含4路signed INT16。
+// SCALE_ALIGN_ENABLE=1：
+//   I = sat16(requant(identity,m1,s1))
+//   M = sat16(requant(main,m2,s2))
+//   Y = sat16(I + requant(M,m3,s3))
+// 第二次requant只限幅到[-65535,65535]，绝不能提前sat16，否则相消结果会改变。
+// 48-bit乘积/绝对值 + Guard舍入 + 饱和感知窄位结果，最后用signed18相加。
+// SCALE_ALIGN_ENABLE=0：两路INT16直接饱和相加，要求Scale已对齐。
+// 四状态流水：S_WAIT锁存第一段结果，S_WAIT2完成第二次量化/相加并输出。
+// 接口和算术结果不变；相对原本地三状态版，每笔事务增加一拍处理延迟。
 // ============================================================================
-//=============================================================================
-// 模块：residual_add_8lane
-// 功能：将主支路8路INT8与Residual Scratch中的8路INT8执行饱和加法。
-//
-// 量化约束：两路数据必须已经位于相同的signed-INT8 scale，zero_point=0。
-// 该约束对应训练端HardwareResidualAdd的shared-scale量化方式。
-//=============================================================================
-
-// -------------------------------------------------------------------------
-// 详细阅读说明：
-// - 根据主分支输出Byte地址换算Scratch word地址，读出8路identity并逐lane相加。
-// - 加法使用signed 9-bit中间值并饱和到[-128,127]；write strobe为0的lane不产生有效结果。
-// - 当前要求主分支与identity使用相同Scale；非单位Residual Scale需额外Requant参数。
-// -------------------------------------------------------------------------
-// [中文注释-自动补充]
-// 模块作用：八路残差加法器。
-// 关键变量/接口：main和identity按lane作signed 9-bit加法并饱和到INT8；要求两分支量化Scale一致。
-// 握手约定：valid与ready在同一上升沿同时为1才完成一次传输；反压期间数据必须保持。
-// 位宽约定：地址通常按Byte计，Weight块为256 bit，Activation/Weight基本元素为signed INT8。
-// -----------------------------------------------------------------------------
 module residual_add_8lane #(
     parameter ADDR_WIDTH = 32,
     parameter SCRATCH_ADDR_WIDTH = 11,
@@ -54,8 +40,9 @@ module residual_add_8lane #(
     output reg                                  error
 );
 
-localparam [1:0] S_IDLE = 2'd0, S_READ = 2'd1, S_WAIT = 2'd2;
-reg [1:0] state;
+localparam [2:0] S_IDLE = 3'd0, S_READ = 3'd1,
+                 S_WAIT = 3'd2, S_WAIT2 = 3'd3;
+reg [2:0] state;
 reg [ADDR_WIDTH-1:0] addr_q;
 reg [ADDR_WIDTH-1:0] base_q;
 reg [63:0] data_q;
@@ -72,62 +59,145 @@ assign busy = (state != S_IDLE) || out_valid;
 assign scratch_rd_valid = (state == S_READ);
 // 连续赋值：组合生成scratch_rd_addr及其相邻接口信号，表达握手、选择或地址关系。
 assign scratch_rd_addr = byte_offset[SCRATCH_ADDR_WIDTH+2:3];
-integer lane;
-reg signed [63:0] lane_sum;
-reg signed [15:0] identity_aligned, main_aligned;
+integer lane, align_lane, reset_lane;
+reg signed [17:0] lane_sum;
+// 每个64-bit写拍含4个INT16，_w为第一段组合结果，_q为跨拍保持的数据。
+// Scale关闭时也锁存原始两支路，不能在S_WAIT2继续使用可能已变化的SRAM数据。
+reg signed [15:0] identity_aligned_w [0:3];
+reg signed [15:0] main_aligned_w [0:3];
+reg signed [15:0] identity_aligned_q [0:3];
+reg signed [15:0] main_aligned_q [0:3];
+reg signed [16:0] main_requant_clip;
 reg [63:0] added_data;
 
-// 16×32乘积最多48位，64位容器容纳绝对值、舍入偏置和结果。
-// 负数先对绝对值舍入再恢复符号，负半整数远离零。
-function signed [63:0] requant16;
+// 第一次量化直接sat16。|INT16 x INT32|<=2^46，48位内取绝对值不会溢出。
+// 绝对值上half-up只需Guard位，不需Sticky。先判饱和，再用16位进位/恢复符号。
+function signed [15:0] requant_sat16;
     input signed [15:0] value;
     input signed [31:0] multiplier;
     input [7:0] shift;
-    reg signed [63:0] product, mag;
+    reg signed [47:0] product;
+    reg [47:0] mag, q;
+    reg round_up;
+    reg [15:0] rounded16;
     begin
-        product = value * multiplier;
-        if (shift == 0) requant16 = product;
-        else if (shift >= 64) requant16 = 64'sd0;
-        else begin
-            mag = (product < 0) ? -product : product;
-            mag = (mag + (64'sd1 << (shift-1))) >>> shift;
-            requant16 = (product < 0) ? -mag : mag;
+        product = $signed(value) * $signed(multiplier);
+        mag = 48'd0;
+        q = 48'd0;
+        round_up = 1'b0;
+        rounded16 = 16'd0;
+        if (shift == 0) begin
+            if (product > 48'sd32767) requant_sat16 = 16'sh7fff;
+            else if (product < -48'sd32768) requant_sat16 = 16'sh8000;
+            else requant_sat16 = product[15:0];
+        end else if (shift >= 8'd48) begin
+            requant_sat16 = 16'sd0;
+        end else begin
+            // shift=47仍必须计算：最大乘积2^46恰好为半值，结果为+1。
+            mag = product[47] ? -product : product;
+            q = mag >> shift;
+            round_up = mag[shift-1'b1];
+            if (!product[47]) begin
+                if (q >= 48'd32767) requant_sat16 = 16'sh7fff;
+                else begin
+                    rounded16 = {1'b0,q[14:0]} + {15'd0,round_up};
+                    requant_sat16 = $signed(rounded16);
+                end
+            end else begin
+                if ((q > 48'd32767) || ((q == 48'd32767) && round_up))
+                    requant_sat16 = 16'sh8000;
+                else begin
+                    rounded16 = {1'b0,q[14:0]} + {15'd0,round_up};
+                    requant_sat16 = -$signed(rounded16);
+                end
+            end
         end
     end
 endfunction
 
-function signed [15:0] saturate16;
-    input signed [63:0] value;
+// 第二次量化后还要与INT16 identity相加，因此仅clip到对称17位范围。
+// 超过+/-65535时无论identity取何值，最终sat16结果都不会改变。
+// 不先构造48位q+1，而是在非饱和路径上只做17位增量。
+function signed [16:0] requant_clip17;
+    input signed [15:0] value;
+    input signed [31:0] multiplier;
+    input [7:0] shift;
+    reg signed [47:0] product;
+    reg [47:0] mag, q;
+    reg round_up;
+    reg [16:0] rounded17;
     begin
-        if (value > 64'sd32767) saturate16 = 16'sh7fff;
-        else if (value < -64'sd32768) saturate16 = 16'sh8000;
-        else saturate16 = value[15:0];
+        product = $signed(value) * $signed(multiplier);
+        mag = 48'd0;
+        q = 48'd0;
+        round_up = 1'b0;
+        rounded17 = 17'd0;
+        if (shift == 0) begin
+            if (product > 48'sd65535) requant_clip17 = 17'sd65535;
+            else if (product < -48'sd65535) requant_clip17 = -17'sd65535;
+            else requant_clip17 = product[16:0];
+        end else if (shift >= 8'd48) begin
+            requant_clip17 = 17'sd0;
+        end else begin
+            mag = product[47] ? -product : product;
+            q = mag >> shift;
+            round_up = mag[shift-1'b1];
+            if (!product[47]) begin
+                if (q >= 48'd65535) requant_clip17 = 17'sd65535;
+                else begin
+                    rounded17 = {1'b0,q[15:0]} + {16'd0,round_up};
+                    requant_clip17 = $signed(rounded17);
+                end
+            end else begin
+                if ((q >= 48'd65535) || ((q == 48'd65534) && round_up))
+                    requant_clip17 = -17'sd65535;
+                else begin
+                    rounded17 = {1'b0,q[15:0]} + {16'd0,round_up};
+                    requant_clip17 = -$signed(rounded17);
+                end
+            end
+        end
     end
 endfunction
 
-// 组合逻辑：根据当前输入计算added_data、lane_sum、lane；本逻辑块不保存跨周期状态。
+// 第一段：两支路独立做首次Scale对齐及INT16饱和，在SRAM响应有效沿锁存。
+always @(*) begin
+    for (align_lane=0; align_lane<4; align_lane=align_lane+1) begin
+        if (SCALE_ALIGN_ENABLE) begin
+            identity_aligned_w[align_lane] = requant_sat16(
+                scratch_rsp_data[16*align_lane +: 16], params_q[31:0], params_q[39:32]);
+            main_aligned_w[align_lane] = requant_sat16(
+                data_q[16*align_lane +: 16], params_q[71:40], params_q[79:72]);
+        end else begin
+            identity_aligned_w[align_lane] = scratch_rsp_data[16*align_lane +: 16];
+            main_aligned_w[align_lane] = data_q[16*align_lane +: 16];
+        end
+    end
+end
+
+// 第二段：只读_q，切断SRAM响应到两次串行requant的长组合路径。
+// S_WAIT2内完成Residual Scale量化、signed18求和及最终INT16饱和。
 always @(*) begin
     added_data = 64'd0;
-    lane_sum = 17'sd0;
-    identity_aligned = 0;
-    main_aligned = 0;
+    lane_sum = 18'sd0;
+    main_requant_clip = 0;
     for (lane=0; lane<4; lane=lane+1) begin
         if (SCALE_ALIGN_ENABLE) begin
-            identity_aligned = saturate16(requant16(scratch_rsp_data[16*lane +: 16], params_q[31:0], params_q[39:32]));
-            main_aligned = saturate16(requant16(data_q[16*lane +: 16], params_q[71:40], params_q[79:72]));
-            lane_sum = $signed(identity_aligned) + requant16(main_aligned, params_q[111:80], params_q[119:112]);
+            main_requant_clip = requant_clip17(main_aligned_q[lane], params_q[111:80], params_q[119:112]);
+            lane_sum = {{2{identity_aligned_q[lane][15]}},identity_aligned_q[lane]} +
+                       {main_requant_clip[16],main_requant_clip};
         end else begin
-            lane_sum = $signed(data_q[16*lane +: 16]) +
-                $signed(scratch_rsp_data[16*lane +: 16]);
+            lane_sum = {{2{main_aligned_q[lane][15]}},main_aligned_q[lane]} +
+                       {{2{identity_aligned_q[lane][15]}},identity_aligned_q[lane]};
         end
         if (!(strb_q[2*lane] || strb_q[2*lane+1]))
             added_data[16*lane +: 16] = 16'd0;
-        else if (lane_sum > 17'sd32767)
+        else if (lane_sum > 18'sd32767)
             added_data[16*lane +: 16] = 16'h7fff;
-        else if (lane_sum < -17'sd32768)
+        else if (lane_sum < -18'sd32768)
             added_data[16*lane +: 16] = 16'h8000;
         else
-        added_data[16*lane +: 16] = lane_sum[15:0];
+            added_data[16*lane +: 16] = lane_sum[15:0];
     end
 end
 
@@ -140,6 +210,10 @@ always @(posedge clk or negedge rst_n) begin
         data_q    <= 64'd0;
         strb_q    <= 8'd0;
         params_q  <= 120'd0;
+        for (reset_lane=0; reset_lane<4; reset_lane=reset_lane+1) begin
+            identity_aligned_q[reset_lane] <= 16'sd0;
+            main_aligned_q[reset_lane] <= 16'sd0;
+        end
         out_valid <= 1'b0;
         out_addr  <= {ADDR_WIDTH{1'b0}};
         out_data  <= 64'd0;
@@ -165,15 +239,25 @@ always @(posedge clk or negedge rst_n) begin
             end
             S_READ:
                 if (scratch_rd_valid && scratch_rd_ready)
-                state <= S_WAIT;
+                    state <= S_WAIT;
             S_WAIT: begin
                 if (scratch_rsp_valid) begin
-                    out_valid <= 1'b1;
-                    out_addr  <= addr_q;
-                    out_data  <= added_data;
-                    out_strb  <= strb_q;
-                    state     <= S_IDLE;
+                    // 该沿消费SRAM响应；后续不再依赖scratch_rsp_data保持。
+                    for (reset_lane=0; reset_lane<4; reset_lane=reset_lane+1) begin
+                        identity_aligned_q[reset_lane] <= identity_aligned_w[reset_lane];
+                        main_aligned_q[reset_lane] <= main_aligned_w[reset_lane];
+                    end
+                    state <= S_WAIT2;
                 end
+            end
+            S_WAIT2: begin
+                // 只停留一拍。输出进入原有valid/ready保持寄存器后回IDLE。
+                // out_ready=0时out_valid及数据保持，in_ready仍为0，不能覆盖未消费结果。
+                out_valid <= 1'b1;
+                out_addr  <= addr_q;
+                out_data  <= added_data;
+                out_strb  <= strb_q;
+                state     <= S_IDLE;
             end
             default: begin
                 state <= S_IDLE;
