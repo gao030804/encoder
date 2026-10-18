@@ -56,38 +56,59 @@ module postprocess_8lane #(
         end
     endfunction
 
-    // 对s>0：round_half_away(p/2^s)=(p+2^(s-1)-(p<0))>>>s。
-    // 精确乘积先符号扩展到73位，再加舍入项，避免边界舍入溢出。
-    function [15:0] round_shift_sat16;
+    // 方法A：用Guard/Sticky判定舍入进位，取消移位之前的73-bit偏置加法。
+    // q=p>>>s已向负无穷取整；正数半值进1，负数仅严格超过半值才进1。
+    // 因此round_up=guard & (~sign | sticky)，负半值仍向远离零方向舍入。
+    // 宽q先检查能否用signed17表示；只有可能回到INT16范围时才做18-bit加法。
+    // PP0/PP1/PP2级数、ready/valid、参数和Tag推进方式均保持不变。
+    function [15:0] round_shift_sat16_opt;
         input signed [71:0] product;
         input [7:0] shift;
         input signed [7:0] zero_point;
-        reg signed [72:0] extended_product, round_offset, shifted, requantized;
+        reg signed [71:0] q;
+        reg [71:0] sticky_mask;
+        reg guard_bit, sticky_bit, round_up;
+        reg signed [17:0] result18;
         begin
-            extended_product = {product[71],product};
-            round_offset = 73'sd0;
+            q = 72'sd0;
+            sticky_mask = 72'd0;
+            guard_bit = 1'b0;
+            sticky_bit = 1'b0;
+            round_up = 1'b0;
+            result18 = 18'sd0;
             if (shift == 0) begin
-                shifted = extended_product;
+                q = product;
             end else if (shift < 72) begin
-                round_offset = (73'sd1 << (shift-1'b1)) -
-                               (product[71] ? 73'sd1 : 73'sd0);
-                shifted = (extended_product + round_offset) >>> shift;
+                q = product >>> shift;
+                guard_bit = product[shift-1'b1];
+                // 被丢弃的低s-1位，s=1时掩码为0；不能用变长part-select。
+                sticky_mask = (72'd1 << (shift-1'b1)) - 72'd1;
+                sticky_bit = |(product & sticky_mask);
+                round_up = guard_bit & (~product[71] | sticky_bit);
             end else if (shift == 80) begin
                 // 保留旧80-bit RTL在异常shift=80时的位级行为：正/零=-1，负=+1。
                 // 部署文件shift实际0..42；此分支仅为完整UINT8输入域的旧版兼容，
                 // 不是推荐量化公式。若改变异常参数政策，需另行统一Golden。
-                shifted = product[71] ? 73'sd1 : -73'sd1;
+                q = product[71] ? 72'sd1 : -72'sd1;
             end else begin
                 // INT40 x INT32的|p|<=2^70；72..79及81..255的旧输出均为0。
-                shifted = 73'sd0;
+                q = 72'sd0;
             end
-            requantized = shifted + {{65{zero_point[7]}},zero_point};
-            if (requantized > 73'sd32767)
-                round_shift_sat16 = 16'sh7fff;
-            else if (requantized < -73'sd32768)
-                round_shift_sat16 = 16'sh8000;
-            else
-                round_shift_sat16 = requantized[15:0];
+            // q不在[-65536,65535]时，round_up+ZP的[-128,128]校正不可能
+            // 将它救回INT16范围。先检测宽符号扩展，禁止直接截断q再判断饱和。
+            if (q[71:17] != {55{q[16]}}) begin
+                round_shift_sat16_opt = q[71] ? 16'sh8000 : 16'sh7fff;
+            end else begin
+                result18 = $signed({q[16],q[16:0]}) +
+                           $signed({17'd0,round_up}) +
+                           $signed({{10{zero_point[7]}},zero_point});
+                if (result18 > 18'sd32767)
+                    round_shift_sat16_opt = 16'sh7fff;
+                else if (result18 < -18'sd32768)
+                    round_shift_sat16_opt = 16'sh8000;
+                else
+                    round_shift_sat16_opt = result18[15:0];
+            end
         end
     endfunction
 
@@ -114,7 +135,7 @@ module postprocess_8lane #(
                 post_valid <= pp1_valid;
                 if (pp1_valid) begin
                     for (lane=0; lane<8; lane=lane+1)
-                        post_data[16*lane +: 16] <= round_shift_sat16(
+                        post_data[16*lane +: 16] <= round_shift_sat16_opt(
                             $signed(pp1_product[72*lane +: 72]),
                             pp1_shift[8*lane +: 8], $signed(pp1_zp[8*lane +: 8]));
                     post_tag <= pp1_tag;

@@ -58,7 +58,8 @@ try {
         'tb/tb_flash_encoder_rvq_full_frame.v','tb/tb_qor_p0_full_frame.v',
         'tb/tb_qor_p0_projection.v','tb/tb_qor_p0_post_stream.v',
         'tb/tb_mesh_scan_port_compat.v','tb/tb_mesh_icg_tech.v',
-        'tb/tb_postprocess_pipeline.v','tb/tb_postprocess_depthwise.v')
+        'tb/tb_postprocess_pipeline.v','tb/tb_postprocess_depthwise.v',
+        'tb/tb_postprocess_guard_sticky.v')
     foreach($p in $sources){if(-not(Test-Path -LiteralPath $p -PathType Leaf)){throw "Missing source: $p"}}
     foreach($p in $sources){
         if([IO.File]::ReadAllText((Resolve-Path -LiteralPath $p).Path) -match '(?m)^\s*input\s+tri0\s+mesh_scan_test_en\b'){
@@ -92,7 +93,7 @@ try {
     $tops=@()
     if($Phase -ne 'Full'){
         if($UseTechClockGate){$tops+='tb_mesh_icg_tech'}else{$tops+='tb_mesh_scan_port_compat'}
-        $tops+=@('tb_postprocess_pipeline','tb_postprocess_depthwise',
+        $tops+=@('tb_postprocess_guard_sticky','tb_postprocess_pipeline','tb_postprocess_depthwise',
             'tb_qor_p0_projection','tb_qor_p0_post_stream')
     }
     if($Phase -ne 'Units'){$tops+='tb_qor_p0_full_frame'}
