@@ -31,9 +31,9 @@ module rvq_backend_w8a16 #(
 localparam IDLE=0,LREQ=1,LWAIT=2,PPREQ=3,PPWAIT=4,PWREQ=5,PWWAIT=6,
            PMAC=7,PQUANT=8,RPREQ=9,RPWAIT=10,NREQ=11,NWAIT=12,
            BREQ=13,BWAIT=14,DOT=15,SCORE=16,SREQ=17,SWAIT=18,
-           UPDATE=19,STAGE_END=20,OUTPUT=21,HOLD=22,
+           UPDATE_MUL=19,STAGE_END=20,OUTPUT=21,HOLD=22,
            // 保留0～22原状态编码，新增两拍切断投影量化长组合路径。
-           PBIAS=23,PMUL=24;
+           PBIAS=23,PMUL=24,UPDATE_RND=25;
 reg [4:0] state;
 reg [3:0] latent_group, stage;
 reg [4:0] channel, dimension;
@@ -45,7 +45,17 @@ reg signed [39:0] projection_acc, bias;
 // 投影量化的两级中间结果：先INT40加Bias饱和，再做40×32有符号乘法。
 // multiplier/shift在PPWAIT锁存，直到当前通道PQUANT完成前均不更新。
 reg signed [39:0] biased_q;
-reg signed [79:0] product_q;
+reg signed [71:0] product_q; // INT40 x INT32的完整乘积，不再扩成80 bit。
+// UPDATE_MUL只做减法/乘法，UPDATE_RND才舍入、饱和及写回。
+// trace元数据与乘积同沿锁存；dimension在舍入写回前保持不变。
+reg signed [48:0] update_product_q; // INT17 x INT32，需要49 bit而非48 bit。
+reg [7:0] update_shift_q, vector_shift_q;
+reg [3:0] update_stage_q;
+reg [4:0] update_dimension_q;
+reg signed [15:0] update_residual_q;
+reg signed [7:0] update_codeword_q;
+reg signed [16:0] update_subtract_q;
+reg signed [39:0] vector_product_q; // 可选重建：INT8 x INT32完整40 bit。
 reg signed [31:0] multiplier, next_m, output_m;
 reg [7:0] shift, next_s, output_s;
 reg signed [15:0] x [0:63];
@@ -114,41 +124,96 @@ function signed [15:0] sat16;
         else sat16=v[15:0];
     end
 endfunction
-function signed [79:0] round80;
-    input signed [79:0] p;
+// 替代sat16(round80)：绝对值上half-up只需Guard位，负半值恢复符号后远离零。
+// 宽位只移位/比较；先判饱和，未饱和分支才做16-bit增量。
+function signed [15:0] round_sat16_72;
+    input signed [71:0] p;
     input [7:0] s;
-    reg [79:0] magnitude, rounded;
+    reg [71:0] magnitude, q;
+    reg guard_bit;
+    reg [15:0] rounded16;
     begin
-        magnitude=p<0 ? -p : p;
-        rounded=(s==0) ? magnitude : (magnitude+(80'd1<<(s-1)))>>s;
-        round80=p<0 ? -$signed(rounded) : $signed(rounded);
+        magnitude=p[71] ? -p : p;
+        q=0;guard_bit=0;rounded16=0;
+        if(s==0) q=magnitude;
+        else if(s<=8'd72) begin q=magnitude>>s;guard_bit=magnitude[s-1'b1];end
+        if(!p[71]) begin
+            if(q>=72'd32767) round_sat16_72=16'sh7fff;
+            else begin
+                rounded16={1'b0,q[14:0]}+{15'd0,guard_bit};
+                round_sat16_72=$signed(rounded16);
+            end
+        end else begin
+            if(q>72'd32767 || (q==72'd32767 && guard_bit)) round_sat16_72=16'sh8000;
+            else begin
+                rounded16={1'b0,q[14:0]}+{15'd0,guard_bit};
+                round_sat16_72=-$signed(rounded16);
+            end
+        end
     end
 endfunction
-function signed [63:0] rq64;
-    input signed [16:0] v;
-    input signed [31:0] m;
+
+// 替代sat16(rq64)：对已寄存的49-bit乘积直接舍入/饱和到INT16。
+function signed [15:0] round_sat16_49;
+    input signed [48:0] p;
     input [7:0] s;
-    reg signed [63:0] p;
-    reg [63:0] mag, rounded;
+    reg [48:0] mag,q;
+    reg guard_bit;
+    reg [15:0] rounded16;
     begin
-        p=v*m; mag=p<0 ? -p : p;
-        rounded=mag>>s;
-        if(s!=0 && (mag & ((64'd1<<s)-1)) >= (64'd1<<(s-1))) rounded=rounded+1;
-        rq64=p<0 ? -$signed(rounded) : $signed(rounded);
+        mag=p[48] ? -p : p;
+        q=0;guard_bit=0;rounded16=0;
+        if(s==0) q=mag;
+        else if(s<=8'd49) begin q=mag>>s;guard_bit=mag[s-1'b1];end
+        // 合法配置s<=63，RPWAIT仍对s>63置error。
+        // 老rq64在非法s>=65时因64-bit移位掩码归零返回+/-1，保留该已有行为，
+        // 不借优化修改异常参数的数值语义。s=64及合法大移位均返回0。
+        if(s>=8'd65) round_sat16_49=p[48] ? -16'sd1 : 16'sd1;
+        else if(!p[48]) begin
+            if(q>=49'd32767) round_sat16_49=16'sh7fff;
+            else begin
+                rounded16={1'b0,q[14:0]}+{15'd0,guard_bit};
+                round_sat16_49=$signed(rounded16);
+            end
+        end else begin
+            if(q>49'd32767 || (q==49'd32767 && guard_bit)) round_sat16_49=16'sh8000;
+            else begin
+                rounded16={1'b0,q[14:0]}+{15'd0,guard_bit};
+                round_sat16_49=-$signed(rounded16);
+            end
+        end
+    end
+endfunction
+
+// 可选重建向量不能逐级sat16：先保留码字缩放的完整值，在INT32 output_sum中累加。
+// 此处没有乘法（已在UPDATE_MUL完成）；49位足够容纳INT8 x INT32结果。
+function signed [48:0] round_vector49;
+    input signed [39:0] p;
+    input [7:0] s;
+    reg [39:0] mag;
+    reg [48:0] q;
+    begin
+        mag=p[39] ? -p : p;
+        q=0;
+        if(s==0) q={9'd0,mag};
+        else if(s<=8'd40) q=(mag>>s)+{48'd0,mag[s-1'b1]};
+        else if(s>=8'd65) q=49'd1; // 与旧rq64的非法shift行为一致。
+        round_vector49=p[39] ? -$signed(q) : $signed(q);
     end
 endfunction
 wire signed [40:0] biased=$signed(projection_acc)+$signed(bias);
 wire signed [39:0] biased40=(biased>41'sd549755813887) ? 40'sh7fffffffff :
     (biased < -41'sd549755813888) ? 40'sh8000000000 : biased[39:0];
 // 第三拍仅处理已寄存乘积的舍入/移位/INT16饱和，保持原整数计算顺序。
-wire signed [15:0] projection_result=sat16(round80(product_q,shift));
+wire signed [15:0] projection_result=round_sat16_72(product_q,shift);
 wire signed [31:0] score_value=norm-(dot_acc<<<1);
 wire signed [7:0] selected_value=word_q[dimension*8+:8];
 wire signed [16:0] sub_value=$signed({residual[dimension][15],residual[dimension]})-
     $signed({{9{selected_value[7]}},selected_value});
-wire signed [63:0] next_value=rq64(sub_value,next_m,next_s);
-wire signed [63:0] output_value=rq64({{9{selected_value[7]}},selected_value},output_m,output_s);
-wire signed [63:0] sum_value=$signed(output_sum[dimension])+output_value;
+wire signed [15:0] next_value=round_sat16_49(update_product_q,update_shift_q);
+wire signed [48:0] output_value=round_vector49(vector_product_q,vector_shift_q);
+wire signed [63:0] sum_value=$signed(output_sum[update_dimension_q])+
+    $signed({{15{output_value[48]}},output_value});
 
 always @(posedge clk or negedge rst_n) begin
     if(!rst_n) begin
@@ -158,7 +223,10 @@ always @(posedge clk or negedge rst_n) begin
         latent_group<=0;stage<=0;channel<=0;dimension<=0;half<=0;group8<=0;
         candidate<=0;best_index<=0;best_score<=0;norm<=0;dot_acc<=0;
         projection_acc<=0;bias<=0;multiplier<=0;shift<=0;
-        biased_q<=40'sd0;product_q<=80'sd0;
+        biased_q<=40'sd0;product_q<=72'sd0;
+        update_product_q<=49'sd0;update_shift_q<=0;vector_product_q<=40'sd0;vector_shift_q<=0;
+        update_stage_q<=0;update_dimension_q<=0;update_residual_q<=0;
+        update_codeword_q<=0;update_subtract_q<=0;
         next_m<=0;next_s<=0;output_m<=0;output_s<=0;word_q<=0;
         trace_stage<=0;trace_candidate<=0;trace_score<=0;trace_index<=0;
         trace_dimension<=0;trace_residual<=0;trace_codeword<=0;trace_subtract<=0;trace_next<=0;
@@ -240,18 +308,32 @@ always @(posedge clk or negedge rst_n) begin
             else begin candidate<=candidate+1'b1;state<=NREQ;end
         end
         SREQ: state<=SWAIT;
-        SWAIT: if(mem_valid) begin word_q<=mem_data;dimension<=0;state<=UPDATE;end
-        UPDATE: begin
-            trace_stage<=stage;trace_dimension<=dimension;trace_residual<=residual[dimension];
-            trace_codeword<=selected_value;trace_subtract<=sub_value;
-            trace_next<=sat16(next_value);update_valid<=1;
-            if(stage!=8) residual[dimension]<=sat16(next_value);
+        SWAIT: if(mem_valid) begin word_q<=mem_data;dimension<=0;state<=UPDATE_MUL;end
+        UPDATE_MUL: begin
+            update_product_q<=$signed(sub_value)*$signed(next_m);
+            update_shift_q<=next_s;
+            update_stage_q<=stage;update_dimension_q<=dimension;
+            update_residual_q<=residual[dimension];
+            update_codeword_q<=selected_value;update_subtract_q<=sub_value;
+            if(COMPUTE_VECTOR) begin
+                vector_product_q<=$signed(selected_value)*$signed(output_m);
+                vector_shift_q<=output_s;
+            end
+            // 维度不能在乘法拍提前递增，否则下一拍会把结果写到错误维度。
+            state<=UPDATE_RND;
+        end
+        UPDATE_RND: begin
+            trace_stage<=update_stage_q;trace_dimension<=update_dimension_q;
+            trace_residual<=update_residual_q;trace_codeword<=update_codeword_q;
+            trace_subtract<=update_subtract_q;trace_next<=next_value;update_valid<=1;
+            if(update_stage_q!=8) residual[update_dimension_q]<=next_value;
             // 只在最后统一饱和；禁止每级先sat16再相加。
             if(COMPUTE_VECTOR) begin
-                output_sum[dimension]<=sum_value[31:0];
+                output_sum[update_dimension_q]<=sum_value[31:0];
                 if(sum_value>2147483647 || sum_value< -64'sd2147483648) error<=1;
             end
-            if(dimension==31) state<=STAGE_END;else dimension<=dimension+1'b1;
+            if(update_dimension_q==31) state<=STAGE_END;
+            else begin dimension<=update_dimension_q+1'b1;state<=UPDATE_MUL;end
         end
         STAGE_END: begin
             stage_valid<=1;trace_stage<=stage;trace_index<=best_index;

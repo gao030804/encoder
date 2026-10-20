@@ -62,7 +62,8 @@ try {
         'tb/tb_postprocess_pipeline.v','tb/tb_postprocess_depthwise.v',
         'tb/tb_postprocess_guard_sticky.v','tb/residual_add_8lane_legacy_reference.v',
         'tb/residual_add_8lane_pipeline_reference.v',
-        'tb/tb_residual_guard_optimization.v','tb/tb_residual_scale_align.v')
+        'tb/tb_residual_guard_optimization.v','tb/tb_residual_scale_align.v',
+        'tb/tb_rvq_backend_arithmetic.v')
     foreach($p in $sources){if(-not(Test-Path -LiteralPath $p -PathType Leaf)){throw "Missing source: $p"}}
     foreach($p in $sources){
         if([IO.File]::ReadAllText((Resolve-Path -LiteralPath $p).Path) -match '(?m)^\s*input\s+tri0\s+mesh_scan_test_en\b'){
@@ -98,7 +99,8 @@ try {
         if($UseTechClockGate){$tops+='tb_mesh_icg_tech'}else{$tops+='tb_mesh_scan_port_compat'}
         $tops+=@('tb_residual_guard_optimization','tb_residual_scale_align',
             'tb_postprocess_guard_sticky','tb_postprocess_pipeline','tb_postprocess_depthwise',
-            'tb_qor_p0_projection','tb_qor_p0_post_stream')
+            'tb_rvq_backend_arithmetic','tb_qor_p0_projection','tb_rvq_backend_update',
+            'tb_rvq_backend_vector_overflow','tb_qor_p0_post_stream')
     }
     if($Phase -ne 'Units'){$tops+='tb_qor_p0_full_frame'}
     foreach($top in $tops){
@@ -137,6 +139,7 @@ try {
                 }
             }
             if($log -notmatch '\[QOR_P0_PASS\]'){throw 'Missing optimized pipeline/deadline coverage'}
+            if($log -notmatch '\[RVQ_UPDATE_PIPE_PASS\]'){throw 'Missing two-phase RVQ UPDATE coverage'}
             if($Frames -eq 10){
                 foreach($tag in @('FRAME_PASS','DMA_PASS')){
                     if([regex]::Matches($log,('\['+$tag+'\]')).Count -ne 10){throw "Missing $tag"}

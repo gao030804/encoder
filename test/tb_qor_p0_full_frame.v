@@ -13,6 +13,7 @@ module tb_qor_p0_full_frame #(
 `define QOR_DENSE u_test.u_dut.u_encoder.u_engine_flash.u_engine.u_dense
     integer checks=0,worst_cycles=0,cycles;
     integer bias_count=0,mul_count=0,skid_stalls=0,skid_replaces=0;
+    integer update_mul_count=0,update_rnd_count=0;
     reg held=0,reported=0;
     reg [319:0] held_data;
     reg [8:0] held_tag;
@@ -31,6 +32,8 @@ module tb_qor_p0_full_frame #(
                `QOR_DENSE.acc_rd_rsp_valid && `QOR_DENSE.acc_rd_rsp_ready) skid_replaces=skid_replaces+1;
             if(u_test.u_dut.u_backend.state==23) bias_count=bias_count+1;
             if(u_test.u_dut.u_backend.state==24) mul_count=mul_count+1;
+            if(u_test.u_dut.u_backend.state==19) update_mul_count=update_mul_count+1;
+            if(u_test.u_dut.u_backend.state==25) update_rnd_count=update_rnd_count+1;
             if(u_test.codec_enqueued) begin
                 cycles=u_test.cycle_count-u_test.frame_start_cycle;
                 duration_ms=cycles*PERIOD_NS/1000000.0;
@@ -45,10 +48,13 @@ module tb_qor_p0_full_frame #(
         if(!reported && ((FRAME_COUNT>1 && u_test.dma_frames==FRAME_COUNT) ||
             (FRAME_COUNT==1 && checks==1 && u_test.codec_level==0))) begin
             reported=1;
-            if(checks!=FRAME_COUNT || bias_count!=32*FRAME_COUNT || mul_count!=32*FRAME_COUNT || skid_stalls==0 || skid_replaces==0) begin
+            if(checks!=FRAME_COUNT || bias_count!=32*FRAME_COUNT || mul_count!=32*FRAME_COUNT ||
+               update_mul_count!=288*FRAME_COUNT || update_rnd_count!=288*FRAME_COUNT ||
+               skid_stalls==0 || skid_replaces==0) begin
                 $display("[TB_FAIL] P0 coverage incomplete frames=%0d bias=%0d mul=%0d stalls=%0d replace=%0d",checks,bias_count,mul_count,skid_stalls,skid_replaces);$finish;
             end
             $display("[QOR_P0_PASS] frames=%0d clock_hz=%0d worst_cycles=%0d worst_ms=%0.6f bias=%0d mul=%0d skid_stall=%0d skid_replace=%0d",checks,CLOCK_HZ,worst_cycles,worst_cycles*PERIOD_NS/1000000.0,bias_count,mul_count,skid_stalls,skid_replaces);
+            $display("[RVQ_UPDATE_PIPE_PASS] mul=%0d rnd=%0d",update_mul_count,update_rnd_count);
         end
     end
 `undef QOR_DENSE
