@@ -9,7 +9,10 @@
 module tb_flash_encoder_rvq_full_frame #(
     parameter integer FRAME_COUNT = 1, // 1保留原回归，10执行独立帧无复位回归
     parameter integer CLOCK_HZ = 50000000,
-    parameter LOG_PREFIX = "logs/"
+    parameter LOG_PREFIX = "logs/",
+    parameter GLOBAL_DEPTH_BLOCKS = 7168,
+    parameter ACTIVATION_ROWS = 1536,
+    parameter RESIDUAL_WORDS = 1536
 );
 `define HIER u_dut.u_encoder.u_engine_flash.g_encoder_weight_hierarchy.u_weight_hierarchy
 
@@ -151,6 +154,9 @@ soundstream_encoder_rvq_w8a16_top #(
     .FAST_SIM_WEIGHT_CACHE(0),
     .USE_GLOBAL_WEIGHT_HIERARCHY(1),
     .GLOBAL_MODEL_BLOCKS(6912),
+    .GLOBAL_DEPTH_BLOCKS(GLOBAL_DEPTH_BLOCKS),
+    .ACTIVATION_ROWS(ACTIVATION_ROWS),
+    .RESIDUAL_WORDS(RESIDUAL_WORDS),
     .BOOT_FLASH_BASE(24'h010000),
     .RESIDUAL_SCALE_ALIGN_ENABLE(1)
 ) u_dut (

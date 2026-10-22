@@ -1,17 +1,17 @@
 // ============================================================================
 // 中文阅读导引（当前实现）
-// 保存Residual identity数据，默认1024×64 bit=8 KiB。
+// 保存Residual identity数据，默认1536×64 bit=12 KiB。
 // 地址是64-bit字索引，不是外部Activation Byte地址；转换由capture/add模块完成。
 // ============================================================================
 //=============================================================================
 // 模块：residual_scratchpad
-// 功能：8 KiB Residual Skip临时存储，64 bit × 1024 words。
+// 功能：12 KiB Residual Skip临时存储，64 bit ×1536 words。
 // capture阶段写、residual-add阶段读，两阶段不会同时发生。
 //=============================================================================
 
 // -------------------------------------------------------------------------
 // 详细阅读说明：
-// - 保存一个Residual Unit的identity分支，默认1024x64-bit=8 KiB。
+// - 保存一个Residual Unit的identity分支，默认1536x64-bit=12 KiB。
 // - 提供独立写入和读取握手；地址以64-bit word为单位，而非Activation Byte地址。
 // -------------------------------------------------------------------------
 // [中文注释-自动补充]
@@ -22,7 +22,7 @@
 // -----------------------------------------------------------------------------
 module residual_scratchpad #(
     parameter ADDR_WIDTH = 11,
-    parameter DEPTH = 2048
+    parameter DEPTH = 1536
 ) (
     input                                       clk,
     input                                       rst_n,
@@ -42,8 +42,11 @@ module residual_scratchpad #(
 // 连续赋值：组合生成wr_ready及其相邻接口信号，表达握手、选择或地址关系。
 assign wr_ready = !rd_valid;
 assign rd_ready = !wr_valid;
-wire wr_fire = wr_valid && wr_ready;
-wire rd_fire = rd_valid && rd_ready;
+// 11位地址可编码2048行，但仅0..1535有效；越界请求置error且不访问SRAM。
+wire wr_in_range = (wr_addr < DEPTH);
+wire rd_in_range = (rd_addr < DEPTH);
+wire wr_fire = wr_valid && wr_ready && wr_in_range;
+wire rd_fire = rd_valid && rd_ready && rd_in_range;
 opentitan_sram_1p_adapter #(
     .WIDTH                       (64),
     .DEPTH                       (DEPTH),
@@ -64,7 +67,8 @@ opentitan_sram_1p_adapter #(
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n)
         error <= 1'b0;
-    else if (wr_valid && rd_valid)
+    else if ((wr_valid && rd_valid) || (wr_valid && !wr_in_range) ||
+             (rd_valid && !rd_in_range))
         error <= 1'b1;
 end
 

@@ -23,7 +23,7 @@
 module residual_capture #(
     parameter ADDR_WIDTH = 32,
     parameter SCRATCH_ADDR_WIDTH = 11,
-    parameter MAX_BYTES = 16384
+    parameter MAX_BYTES = 12288 // 1536x64-bit，identity不得超过实际Scratch容量
 ) (
     input                                       clk,
     input                                       rst_n,

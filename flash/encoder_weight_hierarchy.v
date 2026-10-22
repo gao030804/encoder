@@ -10,7 +10,7 @@
 // 功能：仅面向 Encoder 的四级权重存储层次。
 //
 //   外部 Flash
-//       -> 256 KiB Global Weight SRAM（上电连续 Burst 装载一次）
+//       -> 224 KiB Global SRAM（上电连续 Burst 装载一次）
 //       -> 8 KiB Local Weight SRAM A/B（按层或按 Tile 交替预取）
 //       -> weight_loader / Active-Shadow Weight Register
 //       -> 4x8 Systolic Array
@@ -26,7 +26,8 @@
 
 // -------------------------------------------------------------------------
 // 详细阅读说明：
-// - 上电使用一次QSPI Burst把5084个权重块写入256 KiB Global SRAM。
+// - 顶层Boot搬运6912块（216 KiB Encoder镜像），其中5084块是卷积权重。
+// - Global裁为7168块（224 KiB），由14组、每组2个512x128宏实现。
 // - 计算前按Tile把当前/下一层权重复制到8 KiB Local A/B；较大层通过demand miss继续换Tile。
 // - 请求地址先判断First Layer常驻区或Local命中，未命中时暂停响应并启动Global到Local复制。
 // - Global、Local A和Local B活动信号可用于后续SRAM时钟门控和功耗统计。
@@ -38,8 +39,8 @@
 // 位宽约定：地址通常按Byte计，Weight块为256 bit，Activation/Weight基本元素为signed INT8。
 // -----------------------------------------------------------------------------
 module encoder_weight_hierarchy #(
-    // 适配器组织为16组，每组2个512x128宏，同拍拼成256bit。
-    parameter GLOBAL_DEPTH_BLOCKS      = 8192,  // 8192 x 32 Byte = 256 KiB
+    // 14组深度bank，每组2个512x128宏，同拍拼成256bit；地址仍保留13位。
+    parameter GLOBAL_DEPTH_BLOCKS      = 7168,  // 7168 x 32 Byte = 224 KiB
     parameter GLOBAL_INDEX_WIDTH       = 13,
 
     // 上电从BOOT_FLASH_BASE连续搬运这些块至Global地址0；等于部署镜像块数。
@@ -194,6 +195,7 @@ wire [15:0] selected_bank_blocks = active_first_layer ?
 wire [31:0] request_offset = req_addr - {8'd0, selected_bank_base};
 wire [26:0] request_block_index = request_offset[31:5];
 wire request_in_range = (req_addr[31:24] == 8'd0) &&
+    (req_addr < (GLOBAL_MODEL_BLOCKS << 5)) &&
     (req_addr >= {8'd0, selected_bank_base}) &&
     (request_offset[4:0] == 5'd0) &&
     (request_block_index < selected_bank_blocks);
@@ -211,7 +213,8 @@ wire [GLOBAL_INDEX_WIDTH:0] demand_blocks_remaining =
     GLOBAL_MODEL_BLOCKS - demand_tile_base_block;
 wire demand_address_valid = (req_addr[31:24] == 8'd0) &&
     (req_addr[4:0] == 5'd0) &&
-    (request_global_block < GLOBAL_MODEL_BLOCKS);
+    // 检查完整字节地址，不能只比较截断后的13-bit块号，否则高位会别名到低地址。
+    (req_addr < (GLOBAL_MODEL_BLOCKS << 5));
 wire first_sram_read = npu_read_fire && active_first_layer;
 wire bank_a_sram_read = npu_read_fire && !active_first_layer && !active_bank;
 wire bank_b_sram_read = npu_read_fire && !active_first_layer && active_bank;

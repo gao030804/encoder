@@ -1,6 +1,6 @@
 // ============================================================================
 // 中文阅读导引（当前实现）
-// Activation SRAM组织：A/B各4个1024×16-bit Bank，各8 KiB，总16 KiB。
+// Activation SRAM组织：A/B各4个1536×16-bit Bank，各12 KiB，总24 KiB。
 // byte_offset=addr-base；row=offset>>3；bank=offset[2:1]；byte_sel=offset[0]。
 // 四路读地址可分别选Bank，同一Bank若要求不同row则存在端口冲突，由检测逻辑报告。
 // 一次写64 bit，wr_strb逐字节控制写使能；读写角色由顶层的buffer_select决定。
@@ -30,12 +30,12 @@
 // 握手约定：valid与ready在同一上升沿同时为1才完成一次传输；反压期间数据必须保持。
 // 位宽约定：地址通常按Byte计，Weight块为256 bit，Activation/Weight基本元素为signed INT8。
 // -----------------------------------------------------------------------------
-// W8A16版本：每个Ping/Pong Buffer为4 Bank x 2048 Row x 16 bit = 16 KiB。
-// 每个逻辑lane由适配器再分成4个512x16宏；四lane保持独立地址，不能合并端口。
+// W8A16裁剪版：每个Buffer为4 Bank x1536 Row x16 bit=12 KiB。
+// 每lane由3个512x16宏组成；8个lane共24个宏。四路独立地址能力不变。
 module activation_buffer_pingpong #(
     parameter ADDR_WIDTH = 32,
     parameter ROW_WIDTH  = 11,
-    parameter ROWS       = 2048
+    parameter ROWS       = 1536
 ) (
     input                                       clk,
     input                                       rst_n,

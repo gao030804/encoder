@@ -4,11 +4,16 @@
 module tb_qor_p0_full_frame #(
     parameter integer FRAME_COUNT=10,
     parameter integer CLOCK_HZ=50000000,
-    parameter LOG_PREFIX="logs/qor_p0_50mhz/"
+    parameter LOG_PREFIX="logs/qor_p0_50mhz/",
+    parameter GLOBAL_DEPTH_BLOCKS=7168,
+    parameter ACTIVATION_ROWS=1536,
+    parameter RESIDUAL_WORDS=1536
 );
     localparam real PERIOD_NS=1000000000.0/CLOCK_HZ;
     tb_flash_encoder_rvq_full_frame #(
-        .FRAME_COUNT(FRAME_COUNT),.CLOCK_HZ(CLOCK_HZ),.LOG_PREFIX(LOG_PREFIX)
+        .FRAME_COUNT(FRAME_COUNT),.CLOCK_HZ(CLOCK_HZ),.LOG_PREFIX(LOG_PREFIX),
+        .GLOBAL_DEPTH_BLOCKS(GLOBAL_DEPTH_BLOCKS),.ACTIVATION_ROWS(ACTIVATION_ROWS),
+        .RESIDUAL_WORDS(RESIDUAL_WORDS)
     ) u_test();
 `define QOR_DENSE u_test.u_dut.u_encoder.u_engine_flash.u_engine.u_dense
     integer checks=0,worst_cycles=0,cycles;

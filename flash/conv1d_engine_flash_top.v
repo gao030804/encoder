@@ -34,9 +34,9 @@ module conv1d_engine_flash_top #(
     parameter WEIGHT_CACHE_INDEX_WIDTH = 12,
     parameter FIRST_LAYER_FLASH_BASE = 24'h000000,
 
-    // 当前63层方案：Flash上电一次装入256 KiB Global SRAM，再按Tile搬到8 KiB Local A/B。
+    // 224 KiB Global容纳当前216 KiB镜像；Local A/B仍各8 KiB，搬运策略不变。
     parameter USE_GLOBAL_WEIGHT_HIERARCHY = 0,
-    parameter GLOBAL_DEPTH_BLOCKS = 8192,
+    parameter GLOBAL_DEPTH_BLOCKS = 7168,
     parameter GLOBAL_INDEX_WIDTH = 13,
     parameter GLOBAL_MODEL_BLOCKS = 5084,
     parameter BOOT_AUX_BLOCKS = 0,

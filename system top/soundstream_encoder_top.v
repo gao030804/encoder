@@ -31,19 +31,23 @@ module soundstream_encoder_top #(
     // QSPI半周期分频值取1时，Flash SCLK为主时钟的1/2。
     parameter FLASH_SPI_DIVIDER = 16'd1,
 
-    // 置1后采用Flash->256 KiB Global->2x8 KiB Local的Encoder权重层级。
+    // 置1后采用Flash->224 KiB Global->2x8 KiB Local的Encoder权重层级。
     // FAST_SIM_WEIGHT_CACHE仍具有更高优先级，便于已有全帧testbench快速运行。
-    // 当前63层ROM使用162688 Byte packed weight，默认256 KiB Global SRAM可完整容纳。
+    // 当前63层ROM使用162688 Byte packed weight；216 KiB完整镜像也可容纳。
     // 使用最新紧凑Encoder权重镜像和层描述表时将该参数置1。
     parameter USE_GLOBAL_WEIGHT_HIERARCHY = 1,
-    parameter GLOBAL_DEPTH_BLOCKS = 8192,
+    parameter GLOBAL_DEPTH_BLOCKS = 7168,
     parameter GLOBAL_INDEX_WIDTH = 13,
     parameter GLOBAL_MODEL_BLOCKS = 5084,
     parameter BOOT_AUX_BLOCKS = 0,
     parameter BOOT_FLASH_BASE = 24'h000000,
     parameter USE_OCTAL_STREAM_WEIGHT_CACHE = 0,
     parameter FAST_SIM_WEIGHT_CACHE = 0,
-    parameter RESIDUAL_SCALE_ALIGN_ENABLE = 0
+    parameter RESIDUAL_SCALE_ALIGN_ENABLE = 0,
+    // 4个16-bit lane x1536行=12 KiB/Buffer；Residual为1536x64-bit。
+    // 保留11位行地址，非2幂深度由访问边界检查保护。
+    parameter ACTIVATION_ROWS = 1536,
+    parameter RESIDUAL_WORDS = 1536
 ) (
     output boot_aux_write,
     output [15:0] boot_aux_index,
@@ -367,7 +371,7 @@ conv1d_engine_flash_top #(
     .octal_rx_error              (octal_rx_error)
 );
 
-// Residual capture读取当前Buffer并写入8 KiB Scratch。
+// Residual capture读取当前Buffer并写入12 KiB Scratch。
 wire cap_act_req_valid,cap_act_req_ready,cap_act_rsp_valid,cap_act_rsp_ready;
 wire [ADDR_WIDTH-1:0] cap_addr0,cap_addr1,cap_addr2,cap_addr3;
 wire [3:0] cap_mask;
@@ -377,7 +381,7 @@ wire [10:0] scratch_wr_addr;
 wire [63:0] scratch_wr_data;
 wire [7:0] scratch_wr_strb;
 wire [17:0] capture_bytes_full = (cfg_cin * cfg_input_length) << 1;
-residual_capture u_capture (
+residual_capture #(.MAX_BYTES(RESIDUAL_WORDS*8)) u_capture (
     .clk                         (clk),
     .rst_n                       (rst_n),
     .start                       (capture_start),
@@ -442,7 +446,7 @@ residual_add_8lane #(.SCALE_ALIGN_ENABLE(RESIDUAL_SCALE_ALIGN_ENABLE)) u_residua
     .error                       (add_error)
 );
 
-residual_scratchpad u_residual_scratch (
+residual_scratchpad #(.DEPTH(RESIDUAL_WORDS)) u_residual_scratch (
     .clk                         (clk),
     .rst_n                       (rst_n),
     .wr_valid                    (scratch_wr_valid),
@@ -518,7 +522,7 @@ assign perf_weight_prefetch_done = weight_prefetch_done;
 // 连续赋值：组合生成perf_weight_prefetch_base及其相邻接口信号，表达握手、选择或地址关系。
 assign perf_weight_prefetch_base = weight_prefetch_base;
 assign perf_weight_prefetch_blocks = weight_prefetch_blocks;
-activation_buffer_pingpong u_activation_buffer (
+activation_buffer_pingpong #(.ROWS(ACTIVATION_ROWS)) u_activation_buffer (
     .clk                         (clk),
     .rst_n                       (rst_n),
     .rd_buffer_select            (current_buffer_select),

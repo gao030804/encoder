@@ -7,12 +7,12 @@ module soundstream_encoder_rvq_w8a16_top #(
     // QSPI_HALF_DIV=1时，Flash SCLK为主时钟的1/2；50 MHz主时钟得到25 MHz。
     parameter FLASH_SPI_DIVIDER = 16'd1,
 
-    // 置1后采用Flash->256 KiB Global->2x8 KiB Local的Encoder权重层级。
+    // 置1后采用Flash->224 KiB Global->2x8 KiB Local的Encoder权重层级。
     // FAST_SIM_WEIGHT_CACHE仍具有更高优先级，便于已有全帧testbench快速运行。
-    // 当前63层ROM使用162688 Byte packed weight，默认256 KiB Global SRAM可完整容纳。
+    // 当前Boot的216 KiB镜像保留原地址布局；RVQ的48 KiB另存后端SRAM。
     // 使用最新紧凑Encoder权重镜像和层描述表时将该参数置1。
     parameter USE_GLOBAL_WEIGHT_HIERARCHY = 1,
-    parameter GLOBAL_DEPTH_BLOCKS = 8192,
+    parameter GLOBAL_DEPTH_BLOCKS = 7168,
     parameter GLOBAL_INDEX_WIDTH = 13,
     parameter GLOBAL_MODEL_BLOCKS = 6912,
     parameter BOOT_AUX_BLOCKS = 1536,
@@ -22,7 +22,9 @@ module soundstream_encoder_rvq_w8a16_top #(
     parameter RESIDUAL_SCALE_ALIGN_ENABLE = 1,
     parameter CLOCK_HZ = 50000000,
     // 正常部署只输出索引，32维重建向量交给软件；置1仅用于对拍调试。
-    parameter ENABLE_VECTOR_DEBUG = 0
+    parameter ENABLE_VECTOR_DEBUG = 0,
+    parameter ACTIVATION_ROWS = 1536,
+    parameter RESIDUAL_WORDS = 1536
 ) (
     output encoder_done,
     // encoded_valid/indices是DMA队首的兼容观察口，消费握手统一使用dma_ready。
@@ -175,6 +177,8 @@ soundstream_encoder_top #(
     .FLASH_SPI_DIVIDER(FLASH_SPI_DIVIDER),
     .USE_GLOBAL_WEIGHT_HIERARCHY(USE_GLOBAL_WEIGHT_HIERARCHY),
     .GLOBAL_DEPTH_BLOCKS(GLOBAL_DEPTH_BLOCKS),
+    .ACTIVATION_ROWS(ACTIVATION_ROWS),
+    .RESIDUAL_WORDS(RESIDUAL_WORDS),
     .GLOBAL_INDEX_WIDTH(GLOBAL_INDEX_WIDTH),
     .GLOBAL_MODEL_BLOCKS(GLOBAL_MODEL_BLOCKS),
     .BOOT_AUX_BLOCKS(BOOT_AUX_BLOCKS),
